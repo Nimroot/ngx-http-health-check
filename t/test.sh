@@ -175,6 +175,47 @@ got=$(cx "wc -l < /tmp/srv-health.log")
 [[ $got == 0 ]] && ok "srv: config-down SRV server not probed" "0 probes" \
                 || bad "srv: config-down SRV server not probed" "$got probes"
 
+# --- response framing -------------------------------------------------------------
+# 127.0.0.1:9301 (socat) sends /tmp/raw/resp verbatim and closes. While it
+# is healthy, requests get its response ("ok", 204, or 502 if nginx's proxy
+# rejects it); once it is unhealthy, the backup server 9102 answers.
+
+# raw FORMAT: the server's response from now on, as a printf format
+raw() {
+    "$ENGINE" exec "$C" sh -c \
+        'printf "$1" > /tmp/raw/resp.new && mv /tmp/raw/resp.new /tmp/raw/resp' \
+        sh "$1"
+}
+
+echo "response framing"
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: complete response passes"         /raw/ ok
+since=$(date +%s)
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok\n'
+expect "raw: body shorter than Content-Length fails" /raw/ 9102
+logged "reason: incomplete body" \
+       'peer 127.0.0.1:9301 in upstream "hc_raw" is unhealthy: connection closed before the response body was complete'
+raw 'HTTP/1.0 200 OK\r\n\r\nok\n'
+expect "raw: close-delimited body passes"      /raw/ ok
+since=$(date +%s)
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 100\r\n\r\nok\n'
+expect "raw: conflicting Content-Length fails" /raw/ 9102
+logged "reason: conflicting Content-Length" 'is unhealthy: conflicting Content-Length'
+raw 'HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\n'
+expect "raw: 204 needs no body"                /raw/ 204
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: conflicting Content-Length fails (reversed)" /raw/ 9102
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: complete response passes again"   /raw/ ok
+since=$(date +%s)
+raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nok\n\r\n0\r\n\r\n'
+expect "raw: Transfer-Encoding fails"          /raw/ 9102
+logged "reason: Transfer-Encoding" 'is unhealthy: unsupported Transfer-Encoding'
+raw 'HTTP/1.1 200 OK\r\nContent-Length : 100\r\n\r\nok\n'
+expect "raw: whitespace before colon fails"    /raw/ 9102
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: healthy at the end"               /raw/ ok
+
 # --- configuration errors ---------------------------------------------------------
 
 # conf_test NAME WANT CONFIG_HTTP_BODY: WANT is "ok" or a substring of the error

@@ -1,5 +1,5 @@
 # Test image: nginx built from source with this module, plus dnsmasq for the
-# "resolve" tests. Build context: the repository root (see the Makefile).
+# "resolve" tests and socat for the raw-response tests. Build context: the repository root (see the Makefile).
 
 ARG ALPINE_VERSION=3.24.4
 ARG NGINX_VERSION=1.30.6
@@ -40,13 +40,13 @@ RUN ./auto/configure \
  && ln -s /usr/lib/nginx/modules /out/etc/nginx/modules
 
 FROM docker.io/library/alpine:${ALPINE_VERSION}
-RUN apk add --no-cache dnsmasq libcrypto3 libssl3 pcre2 zlib \
+RUN apk add --no-cache dnsmasq libcrypto3 libssl3 pcre2 socat zlib \
  && addgroup -S nginx \
  && adduser -S -D -H -G nginx -h /nonexistent -s /sbin/nologin nginx
 COPY --from=builder /out/usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /out/usr/lib/nginx/modules/ /usr/lib/nginx/modules/
 COPY --from=builder /out/etc/nginx/ /etc/nginx/
 COPY t/nginx.conf /etc/nginx/nginx.conf
-COPY t/entrypoint.sh /entrypoint.sh
+COPY t/entrypoint.sh t/raw.sh /
 STOPSIGNAL SIGQUIT
 ENTRYPOINT ["/entrypoint.sh"]

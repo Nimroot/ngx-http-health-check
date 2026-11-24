@@ -124,6 +124,12 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 - Servers marked `down` in the configuration are never checked or brought up.
   That includes servers added by `resolve`, also from SRV records
   (`service=`), whose names are those of the records' targets.
+- A response passes only if it is complete: a response with status 1xx, 204
+  or 304 ends with its header; any other body ends after `Content-Length`
+  bytes (or the first 256k of them), or when the server closes the
+  connection if there is no `Content-Length`. A connection closed early,
+  `Content-Length` headers with different values, `Transfer-Encoding`, or a
+  header line with space before its colon fail the check.
 - Servers start healthy. That includes servers added by `resolve`, and
   everything after a reload or a restart of worker 0.
 - A change of state is logged: `warn` with the reason, `notice` when the
@@ -152,8 +158,8 @@ not from testing against NGINX Plus.
 ## Limitations
 
 - **Worker 0 runs all checks.** If it is busy or stuck, checks are delayed.
-- **The response must be HTTP/1.x without chunked encoding,** which a server
-  answering an HTTP/1.0 request shouldn't use.
+- **The response must be HTTP/1.x without `Transfer-Encoding`** (such as
+  chunked, which a server answering an HTTP/1.0 request must not use).
 - **The response header is limited to 32k.** A larger one fails the check.
 - **Zone size:** nginx's minimum for an upstream `zone` depends on the memory
   page size. The 64k used in many examples is too small on systems with 16k
@@ -188,6 +194,8 @@ where requests go:
   server leaves the count of usable servers correct (dnsmasq in the container
   serves the changing answers); an SRV server marked `down` gets neither
   probes nor requests;
+- incomplete or ambiguously delimited responses fail, served byte for byte by
+  socat; responses without a body or delimited by closing pass;
 - log messages; and `nginx -t` accepts valid configurations and rejects each
   unsupported or invalid one with a clear message.
 

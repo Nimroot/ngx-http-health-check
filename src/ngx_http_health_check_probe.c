@@ -43,6 +43,10 @@ struct ngx_http_health_check_probe_s {
     off_t                               content_length;
     /* ngx_http_health_check_header_t */
     ngx_array_t                        *headers;
+    /* why ngx_http_health_check_parse() rejected the response */
+    u_char                             *error;
+
+    unsigned                            bodyless:1;
 
     ngx_http_health_check_probe_t      *next;
 };
@@ -384,7 +388,10 @@ ngx_http_health_check_recv(ngx_event_t *rev)
             size = b->end - b->start;
 
             if (size >= NGX_HTTP_HEALTH_CHECK_BUF_MAX) {
-                /* only the first 256k of the body are examined */
+                /*
+                 * Only the first 256k of the body are examined. The header
+                 * is at most 32k, so the buffer holds at least that much.
+                 */
                 ngx_http_health_check_evaluate(probe);
                 return;
             }
@@ -424,26 +431,31 @@ ngx_http_health_check_recv(ngx_event_t *rev)
         }
 
         if (n == 0) {
+            /* evaluate() rejects a body shorter than its Content-Length */
             ngx_http_health_check_evaluate(probe);
             return;
         }
 
         b->last += n;
 
-        /* done early if Content-Length says the body is complete */
+        /*
+         * Done early once the header is complete for a response without
+         * a body, or once Content-Length says the body is complete (or
+         * at least 256k of it are here). Otherwise the body ends when the
+         * server closes the connection.
+         */
 
         rc = ngx_http_health_check_parse(probe, 0);
 
         if (rc == NGX_ERROR) {
-            ngx_http_health_check_finish(probe, (u_char *) "invalid response");
+            ngx_http_health_check_finish(probe, probe->error);
             return;
         }
 
         if (rc == NGX_OK) {
             body = b->last - b->start - probe->header_len;
 
-            if (probe->status < 200 || probe->status == 204
-                || probe->status == 304
+            if (probe->bodyless
                 || (probe->content_length >= 0
                     && (off_t) body
                        >= ngx_min(probe->content_length,
@@ -452,15 +464,6 @@ ngx_http_health_check_recv(ngx_event_t *rev)
                 ngx_http_health_check_evaluate(probe);
                 return;
             }
-        }
-
-        if (rc == NGX_AGAIN
-            && (size_t) (b->last - b->start)
-               >= NGX_HTTP_HEALTH_CHECK_HEADER_MAX)
-        {
-            ngx_http_health_check_finish(probe,
-                                     (u_char *) "response header too large");
-            return;
         }
     }
 }
@@ -474,15 +477,26 @@ ngx_http_health_check_dummy(ngx_event_t *ev)
 
 /*
  * Parses the status line and header from the buffer. NGX_AGAIN until the
- * empty line ending the header has arrived. With "store", also collects the
- * header lines (pointing into the buffer, so only once reading is over).
+ * empty line ending the header has arrived, NGX_ERROR (with probe->error)
+ * for a response that is invalid or whose body can't be delimited, NGX_ABORT
+ * if out of memory. With "store", also collects the header lines (pointing
+ * into the buffer, so only once reading is over).
+ *
+ * The body of a response with status 1xx, 204 or 304 is empty, whatever
+ * its header says (RFC 9112, 6.3). Any other body is delimited by
+ * Content-Length or by the end of the connection: Transfer-Encoding (such
+ * as chunked, which a server must not use in answer to an HTTP/1.0 request)
+ * isn't supported, and several different Content-Length values, or a field
+ * name the server may have meant as Content-Length but isn't, make the
+ * length ambiguous.
  */
 
 static ngx_int_t
 ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
     ngx_uint_t store)
 {
-    u_char                          *p, *line, *end, *nl, *colon, *v;
+    off_t                            len;
+    u_char                          *p, *q, *line, *end, *nl, *colon, *v;
     ngx_buf_t                       *b;
     ngx_uint_t                       first;
     ngx_http_health_check_header_t  *h;
@@ -492,19 +506,32 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
     first = 1;
 
     probe->content_length = -1;
+    probe->bodyless = 0;
+    probe->error = (u_char *) "invalid response header";
 
     if (store) {
         probe->headers = ngx_array_create(probe->pool, 8,
                                     sizeof(ngx_http_health_check_header_t));
         if (probe->headers == NULL) {
-            return NGX_ERROR;
+            return NGX_ABORT;
         }
     }
 
     for ( ;; ) {
         nl = ngx_strlchr(p, b->last, LF);
+
         if (nl == NULL) {
+            if ((size_t) (b->last - b->start)
+                >= NGX_HTTP_HEALTH_CHECK_HEADER_MAX)
+            {
+                goto too_large;
+            }
+
             return NGX_AGAIN;
+        }
+
+        if ((size_t) (nl + 1 - b->start) > NGX_HTTP_HEALTH_CHECK_HEADER_MAX) {
+            goto too_large;
         }
 
         line = p;
@@ -516,6 +543,7 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
             if (end - line < 12 || ngx_strncmp(line, "HTTP/", 5) != 0
                 || line[8] != ' ')
             {
+                probe->error = (u_char *) "invalid status line";
                 return NGX_ERROR;
             }
 
@@ -523,23 +551,37 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
                 || line[10] < '0' || line[10] > '9'
                 || line[11] < '0' || line[11] > '9')
             {
+                probe->error = (u_char *) "invalid status line";
                 return NGX_ERROR;
             }
 
             probe->status = (line[9] - '0') * 100 + (line[10] - '0') * 10
                             + (line[11] - '0');
+
+            probe->bodyless = (probe->status < 200 || probe->status == 204
+                               || probe->status == 304);
+
             first = 0;
             continue;
         }
 
         if (end == line) {
             probe->header_len = p - b->start;
+            probe->error = NULL;
             return NGX_OK;
         }
+
+        /* "Name: value"; no continuation lines or space before the colon */
 
         colon = ngx_strlchr(line, end, ':');
         if (colon == NULL || colon == line) {
             return NGX_ERROR;
+        }
+
+        for (q = line; q < colon; q++) {
+            if (*q <= ' ' || *q == 0x7f) {
+                return NGX_ERROR;
+            }
         }
 
         v = colon + 1;
@@ -551,21 +593,42 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
             end--;
         }
 
-        if (colon - line == sizeof("Content-Length") - 1
+        /* framing of a body, if the response has one */
+
+        if (!probe->bodyless
+            && colon - line == sizeof("Content-Length") - 1
             && ngx_strncasecmp(line, (u_char *) "Content-Length",
                                sizeof("Content-Length") - 1)
                == 0)
         {
-            probe->content_length = ngx_atoof(v, end - v);
-            if (probe->content_length == NGX_ERROR) {
+            len = ngx_atoof(v, end - v);
+            if (len == NGX_ERROR) {
+                probe->error = (u_char *) "invalid Content-Length";
                 return NGX_ERROR;
             }
+
+            if (probe->content_length >= 0 && probe->content_length != len) {
+                probe->error = (u_char *) "conflicting Content-Length";
+                return NGX_ERROR;
+            }
+
+            probe->content_length = len;
+        }
+
+        if (!probe->bodyless
+            && colon - line == sizeof("Transfer-Encoding") - 1
+            && ngx_strncasecmp(line, (u_char *) "Transfer-Encoding",
+                               sizeof("Transfer-Encoding") - 1)
+               == 0)
+        {
+            probe->error = (u_char *) "unsupported Transfer-Encoding";
+            return NGX_ERROR;
         }
 
         if (store) {
             h = ngx_array_push(probe->headers);
             if (h == NULL) {
-                return NGX_ERROR;
+                return NGX_ABORT;
             }
 
             h->name.data = line;
@@ -574,6 +637,11 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
             h->value.len = end - v;
         }
     }
+
+too_large:
+
+    probe->error = (u_char *) "response header too large";
+    return NGX_ERROR;
 }
 
 
@@ -588,6 +656,11 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
 
     rc = ngx_http_health_check_parse(probe, 1);
 
+    if (rc == NGX_ABORT) {
+        ngx_http_health_check_finish(probe, (u_char *) "out of memory");
+        return;
+    }
+
     if (rc == NGX_AGAIN) {
         ngx_http_health_check_finish(probe,
                                      (u_char *) "incomplete response header");
@@ -595,15 +668,31 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
     }
 
     if (rc == NGX_ERROR) {
-        ngx_http_health_check_finish(probe, (u_char *) "invalid response");
+        ngx_http_health_check_finish(probe, probe->error);
         return;
     }
 
     body.data = probe->buf.start + probe->header_len;
     len = probe->buf.last - body.data;
 
-    if (probe->content_length >= 0 && (off_t) len > probe->content_length) {
-        len = (size_t) probe->content_length;
+    if (probe->bodyless) {
+        len = 0;
+
+    } else if (probe->content_length >= 0) {
+
+        if ((off_t) len > probe->content_length) {
+            len = (size_t) probe->content_length;
+        }
+
+        /* reading stops early only once enough of the body is here */
+
+        if ((off_t) len < ngx_min(probe->content_length,
+                                  NGX_HTTP_HEALTH_CHECK_BODY_MAX))
+        {
+            ngx_http_health_check_finish(probe, (u_char *)
+                  "connection closed before the response body was complete");
+            return;
+        }
     }
 
     body.len = ngx_min(len, NGX_HTTP_HEALTH_CHECK_BODY_MAX);
