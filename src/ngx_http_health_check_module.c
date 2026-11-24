@@ -297,9 +297,8 @@ static ngx_http_health_check_upstream_t *
 ngx_http_health_check_get_upstream(ngx_conf_t *cf,
     ngx_http_health_check_main_conf_t *hmcf, ngx_http_upstream_srv_conf_t *uscf)
 {
-    ngx_str_t                          *name;
     ngx_uint_t                          i;
-    ngx_http_upstream_server_t         *server;
+    ngx_http_upstream_server_t         *server, **sp;
     ngx_http_health_check_upstream_t   *up, **upp;
 
     upp = hmcf->upstreams.elts;
@@ -316,7 +315,10 @@ ngx_http_health_check_get_upstream(ngx_conf_t *cf,
 
     up->uscf = uscf;
 
-    if (ngx_array_init(&up->down, cf->pool, 2, sizeof(ngx_str_t)) != NGX_OK) {
+    if (ngx_array_init(&up->down, cf->pool, 2,
+                       sizeof(ngx_http_upstream_server_t *))
+        != NGX_OK)
+    {
         return NULL;
     }
 
@@ -325,16 +327,16 @@ ngx_http_health_check_get_upstream(ngx_conf_t *cf,
     if (uscf->servers) {
         server = uscf->servers->elts;
         for (i = 0; i < uscf->servers->nelts; i++) {
-            if (!server[i].down) {
+            if (!server[i].down || server[i].host.len) {
                 continue;
             }
 
-            name = ngx_array_push(&up->down);
-            if (name == NULL) {
+            sp = ngx_array_push(&up->down);
+            if (sp == NULL) {
                 return NULL;
             }
 
-            *name = server[i].name;
+            *sp = &server[i];
         }
     }
 

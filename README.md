@@ -122,6 +122,8 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   the configuration, so `proxy_next_upstream` makes one attempt per healthy
   server.
 - Servers marked `down` in the configuration are never checked or brought up.
+  That includes servers added by `resolve`, also from SRV records
+  (`service=`), whose names are those of the records' targets.
 - Servers start healthy. That includes servers added by `resolve`, and
   everything after a reload or a restart of worker 0.
 - A change of state is logged: `warn` with the reason, `notice` when the
@@ -184,7 +186,8 @@ where requests go:
 - `proxy_next_upstream` counts only healthy servers;
 - with `resolve`, servers added by DNS are checked, and removing an unhealthy
   server leaves the count of usable servers correct (dnsmasq in the container
-  serves the changing answers);
+  serves the changing answers); an SRV server marked `down` gets neither
+  probes nor requests;
 - log messages; and `nginx -t` accepts valid configurations and rejects each
   unsupported or invalid one with a clear message.
 

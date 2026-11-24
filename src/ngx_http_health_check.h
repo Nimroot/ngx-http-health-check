@@ -28,7 +28,11 @@ typedef struct {
 /* An upstream group checked by one or more health_check directives. */
 typedef struct {
     ngx_http_upstream_srv_conf_t       *uscf;
-    /* servers marked "down" in the configuration (ngx_str_t) */
+    /*
+     * server lines without "resolve" marked "down" in the configuration
+     * (ngx_http_upstream_server_t *); servers added by "resolve" take their
+     * state from their template, see ngx_http_health_check_admin_down()
+     */
     ngx_array_t                         down;
     /* ngx_http_health_check_peer_t */
     ngx_array_t                        *peers;

@@ -64,23 +64,51 @@ static ngx_uint_t ngx_http_health_check_admin_down(
     ngx_http_health_check_upstream_t *up, ngx_http_upstream_rr_peer_t *peer);
 
 
+/*
+ * Whether a server is down by configuration ("down" on its server line)
+ * rather than by its health.
+ *
+ * A server added by "resolve" is a copy of its server line's template, whose
+ * state nobody but the configuration changes; its name can't identify the
+ * server line, as for an SRV record it is the record's target. Any other
+ * server comes from a server line without "resolve", identified by its name
+ * and one of its addresses.
+ */
+
 static ngx_uint_t
 ngx_http_health_check_admin_down(ngx_http_health_check_upstream_t *up,
     ngx_http_upstream_rr_peer_t *peer)
 {
-    ngx_str_t   *name;
-    ngx_uint_t   i;
+    ngx_uint_t                    i, j;
+    ngx_http_upstream_server_t  **server;
 
     if (!peer->down) {
         return 0;
     }
 
-    name = up->down.elts;
+    if (peer->host) {
+        return peer->host->peer && peer->host->peer->down;
+    }
+
+    server = up->down.elts;
     for (i = 0; i < up->down.nelts; i++) {
-        if (name[i].len == peer->server.len
-            && ngx_strncmp(name[i].data, peer->server.data, name[i].len) == 0)
+
+        if (server[i]->name.len != peer->server.len
+            || ngx_strncmp(server[i]->name.data, peer->server.data,
+                           peer->server.len)
+               != 0)
         {
-            return 1;
+            continue;
+        }
+
+        for (j = 0; j < server[i]->naddrs; j++) {
+            if (ngx_cmp_sockaddr(server[i]->addrs[j].sockaddr,
+                                 server[i]->addrs[j].socklen,
+                                 peer->sockaddr, peer->socklen, 1)
+                == NGX_OK)
+            {
+                return 1;
+            }
         }
     }
 

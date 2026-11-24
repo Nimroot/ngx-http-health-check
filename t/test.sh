@@ -163,6 +163,18 @@ attempts "dns flaky: three attempts"           /flaky/dns/ "503 503, 503, 503"
 dns 127.0.0.1 127.0.0.2
 cx "rm -rf /tmp/hc"
 
+# --- DNS SRV server down by configuration ---------------------------------------
+# srv.test service=http -> a.srv.test:9201 = 127.0.0.4. nginx names such a
+# server after the SRV target (a.srv.test), not after the configured name.
+
+echo "SRV: srv.test resolve down"
+expect "srv control: the SRV record resolves"  /srv-up/ 127.0.0.4
+sleep 3
+now    "srv: config-down SRV server stays down" /srv/ 9102
+got=$(cx "wc -l < /tmp/srv-health.log")
+[[ $got == 0 ]] && ok "srv: config-down SRV server not probed" "0 probes" \
+                || bad "srv: config-down SRV server not probed" "$got probes"
+
 # --- configuration errors ---------------------------------------------------------
 
 # conf_test NAME WANT CONFIG_HTTP_BODY: WANT is "ok" or a substring of the error
