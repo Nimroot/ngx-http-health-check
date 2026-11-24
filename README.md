@@ -130,6 +130,10 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   connection if there is no `Content-Length`. A connection closed early,
   `Content-Length` headers with different values, `Transfer-Encoding`, or a
   header line with space before its colon fail the check.
+- At most a quarter of `worker_connections` probes run at once; the others
+  wait for their turn. A probe that worker 0 cannot carry out for a reason
+  of its own (no free connection, out of memory) leaves the server's state
+  as it was and logs an `error`.
 - Servers start healthy. That includes servers added by `resolve`, and
   everything after a reload or a restart of worker 0.
 - A change of state is logged: `warn` with the reason, `notice` when the
@@ -196,6 +200,7 @@ where requests go:
   probes nor requests;
 - incomplete or ambiguously delimited responses fail, served byte for byte by
   socat; responses without a body or delimited by closing pass;
+- more servers than free connections in worker 0 don't make any check fail;
 - log messages; and `nginx -t` accepts valid configurations and rejects each
   unsupported or invalid one with a clear message.
 

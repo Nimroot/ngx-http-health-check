@@ -216,6 +216,39 @@ expect "raw: whitespace before colon fails"    /raw/ 9102
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 expect "raw: healthy at the end"               /raw/ ok
 
+# --- more servers than connection slots --------------------------------------------
+# A second nginx in the container: 40 probes per round (the same healthy
+# server, 40 times), 16 worker_connections. Probes that would not fit must
+# wait for a slot, not fail the server.
+
+echo "probes beyond worker_connections"
+"$ENGINE" exec -i "$C" sh -c 'mkdir -p /tmp/m3 && cat > /tmp/m3/nginx.conf' <<EOF
+load_module modules/ngx_http_health_check_module.so;
+worker_processes 1;
+error_log /tmp/m3/error.log info;
+pid /tmp/m3/nginx.pid;
+events { worker_connections 16; }
+http {
+    access_log off;
+    upstream many {
+        zone many 256k;
+$(for _ in {1..40}; do echo "        server 127.0.0.1:9101;"; done)
+    }
+    server {
+        listen 127.0.0.1:18990;
+        location / { proxy_pass http://many; health_check interval=1s uri=/health; }
+    }
+}
+EOF
+cx "nginx -c /tmp/m3/nginx.conf"
+sleep 4
+got=$(cx "wget -qO- http://127.0.0.1:18990/ 2>&1")
+[[ $got == 9101 ]] && ok "many: server still in use" "$got" || bad "many: server still in use" "got $got"
+got=$(cx "grep -c 'is unhealthy' /tmp/m3/error.log")
+[[ $got == 0 ]] && ok "many: no probe failed for lack of connections" "0 failures" \
+                || bad "many: no probe failed for lack of connections" "$got failures"
+cx "nginx -c /tmp/m3/nginx.conf -s quit"
+
 # --- configuration errors ---------------------------------------------------------
 
 # conf_test NAME WANT CONFIG_HTTP_BODY: WANT is "ok" or a substring of the error

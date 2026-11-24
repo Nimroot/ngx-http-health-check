@@ -46,14 +46,27 @@ struct ngx_http_health_check_probe_s {
     /* why ngx_http_health_check_parse() rejected the response */
     u_char                             *error;
 
-    unsigned                            bodyless:1;
+    /* in the round's list, then in the waiting queue */
+    ngx_queue_t                         queue;
 
-    ngx_http_health_check_probe_t      *next;
+    unsigned                            started:1;
+    unsigned                            bodyless:1;
 };
 
 
+/*
+ * Probes wait in a queue and at most max_active of them have a connection
+ * at a time, so that a round doesn't take every connection of worker 0.
+ */
+static ngx_queue_t  ngx_http_health_check_waiting;
+static ngx_uint_t   ngx_http_health_check_active;
+static ngx_uint_t   ngx_http_health_check_max_active;
+static ngx_uint_t   ngx_http_health_check_starting;
+
+
 static void ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
-    ngx_http_health_check_probe_t *list);
+    ngx_queue_t *list);
+static void ngx_http_health_check_start(void);
 static void ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe);
 static void ngx_http_health_check_send(ngx_event_t *wev);
 static void ngx_http_health_check_recv(ngx_event_t *rev);
@@ -64,8 +77,24 @@ static void ngx_http_health_check_evaluate(
     ngx_http_health_check_probe_t *probe);
 static void ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
     u_char *reason);
+static void ngx_http_health_check_abort(ngx_http_health_check_probe_t *probe,
+    u_char *reason);
+static void ngx_http_health_check_close(ngx_http_health_check_probe_t *probe);
 static ngx_uint_t ngx_http_health_check_admin_down(
     ngx_http_health_check_upstream_t *up, ngx_http_upstream_rr_peer_t *peer);
+
+
+void
+ngx_http_health_check_probe_init(ngx_cycle_t *cycle)
+{
+    ngx_queue_init(&ngx_http_health_check_waiting);
+
+    ngx_http_health_check_active = 0;
+    ngx_http_health_check_starting = 0;
+
+    /* the rest is left to client connections */
+    ngx_http_health_check_max_active = ngx_max(cycle->connection_n / 4, 1);
+}
 
 
 /*
@@ -125,11 +154,13 @@ ngx_http_health_check_admin_down(ngx_http_health_check_upstream_t *up,
 void
 ngx_http_health_check_run(ngx_event_t *ev)
 {
+    ngx_uint_t                         complete;
     ngx_pool_t                        *pool;
+    ngx_queue_t                        list;
     ngx_http_upstream_rr_peer_t       *peer;
     ngx_http_upstream_rr_peers_t      *peers;
     ngx_http_health_check_t           *check;
-    ngx_http_health_check_probe_t     *probe, *list;
+    ngx_http_health_check_probe_t     *probe;
     ngx_http_health_check_upstream_t  *up;
 
     check = ev->data;
@@ -139,7 +170,8 @@ ngx_http_health_check_run(ngx_event_t *ev)
         return;
     }
 
-    list = NULL;
+    ngx_queue_init(&list);
+    complete = 1;
 
     for (peers = up->uscf->peer.data; peers; peers = peers->next) {
 
@@ -153,12 +185,14 @@ ngx_http_health_check_run(ngx_event_t *ev)
 
             pool = ngx_create_pool(1024, ev->log);
             if (pool == NULL) {
+                complete = 0;
                 continue;
             }
 
             probe = ngx_pcalloc(pool, sizeof(ngx_http_health_check_probe_t));
             if (probe == NULL) {
                 ngx_destroy_pool(pool);
+                complete = 0;
                 continue;
             }
 
@@ -171,34 +205,39 @@ ngx_http_health_check_run(ngx_event_t *ev)
 
             if (probe->sockaddr == NULL || probe->name.data == NULL) {
                 ngx_destroy_pool(pool);
+                complete = 0;
                 continue;
             }
 
             ngx_memcpy(probe->sockaddr, peer->sockaddr, peer->socklen);
             ngx_memcpy(probe->name.data, peer->name.data, peer->name.len);
 
-            probe->next = list;
-            list = probe;
+            ngx_queue_insert_tail(&list, &probe->queue);
             check->pending++;
         }
 
         ngx_http_upstream_rr_peers_unlock(peers);
     }
 
-    ngx_http_health_check_prune(up, list);
+    /*
+     * A server left out of an incomplete list may still be in the group:
+     * its state is kept until a round lists every server.
+     */
 
-    if (list == NULL) {
+    if (complete) {
+        ngx_http_health_check_prune(up, &list);
+    }
+
+    if (ngx_queue_empty(&list)) {
         ngx_add_timer(ev, check->interval);
         return;
     }
 
     /* the next round is scheduled when the last probe finishes */
 
-    while (list) {
-        probe = list;
-        list = list->next;
-        ngx_http_health_check_connect(probe);
-    }
+    ngx_queue_add(&ngx_http_health_check_waiting, &list);
+
+    ngx_http_health_check_start();
 }
 
 
@@ -209,9 +248,10 @@ ngx_http_health_check_run(ngx_event_t *ev)
 
 static void
 ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
-    ngx_http_health_check_probe_t *list)
+    ngx_queue_t *list)
 {
     ngx_uint_t                      i;
+    ngx_queue_t                    *q;
     ngx_http_health_check_peer_t   *st;
     ngx_http_health_check_probe_t  *probe;
 
@@ -220,7 +260,12 @@ ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
 
     while (i < up->peers->nelts) {
 
-        for (probe = list; probe; probe = probe->next) {
+        for (q = ngx_queue_head(list);
+             q != ngx_queue_sentinel(list);
+             q = ngx_queue_next(q))
+        {
+            probe = ngx_queue_data(q, ngx_http_health_check_probe_t, queue);
+
             if (ngx_cmp_sockaddr(st[i].sockaddr, st[i].socklen,
                                  probe->sockaddr, probe->socklen, 1)
                 == NGX_OK)
@@ -229,7 +274,7 @@ ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
             }
         }
 
-        if (probe) {
+        if (q != ngx_queue_sentinel(list)) {
             i++;
             continue;
         }
@@ -237,6 +282,41 @@ ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
         ngx_free(st[i].sockaddr);
         st[i] = st[--up->peers->nelts];
     }
+}
+
+
+/* Starts waiting probes while fewer than max_active are running. */
+
+static void
+ngx_http_health_check_start(void)
+{
+    ngx_queue_t                    *q;
+    ngx_http_health_check_probe_t  *probe;
+
+    /* a probe that ends at once calls this again: the loop goes on */
+
+    if (ngx_http_health_check_starting) {
+        return;
+    }
+
+    ngx_http_health_check_starting = 1;
+
+    while (ngx_http_health_check_active < ngx_http_health_check_max_active
+           && !ngx_queue_empty(&ngx_http_health_check_waiting)
+           && !ngx_exiting && !ngx_quit && !ngx_terminate)
+    {
+        q = ngx_queue_head(&ngx_http_health_check_waiting);
+        ngx_queue_remove(q);
+
+        probe = ngx_queue_data(q, ngx_http_health_check_probe_t, queue);
+
+        probe->started = 1;
+        ngx_http_health_check_active++;
+
+        ngx_http_health_check_connect(probe);
+    }
+
+    ngx_http_health_check_starting = 0;
 }
 
 
@@ -260,8 +340,16 @@ ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe)
 
     rc = ngx_event_connect_peer(pc);
 
-    if (rc == NGX_ERROR || rc == NGX_BUSY || rc == NGX_DECLINED) {
+    /* NGX_DECLINED: connect() failed; NGX_ERROR: no socket or connection */
+
+    if (rc == NGX_DECLINED) {
         ngx_http_health_check_finish(probe, (u_char *) "connect() failed");
+        return;
+    }
+
+    if (rc != NGX_OK && rc != NGX_AGAIN) {
+        ngx_http_health_check_abort(probe,
+                                    (u_char *) "cannot open a connection");
         return;
     }
 
@@ -321,7 +409,8 @@ ngx_http_health_check_send(ngx_event_t *wev)
             }
 
             if (ngx_handle_write_event(wev, 0) != NGX_OK) {
-                ngx_http_health_check_finish(probe, (u_char *) "send() failed");
+                ngx_http_health_check_abort(probe,
+                                       (u_char *) "cannot wait to send");
             }
 
             return;
@@ -344,7 +433,7 @@ ngx_http_health_check_send(ngx_event_t *wev)
     }
 
     if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
-        ngx_http_health_check_finish(probe, (u_char *) "recv() failed");
+        ngx_http_health_check_abort(probe, (u_char *) "cannot wait to read");
     }
 }
 
@@ -373,7 +462,7 @@ ngx_http_health_check_recv(ngx_event_t *rev)
     if (b->start == NULL) {
         b->start = ngx_palloc(probe->pool, NGX_HTTP_HEALTH_CHECK_BUF_INIT);
         if (b->start == NULL) {
-            ngx_http_health_check_finish(probe, (u_char *) "out of memory");
+            ngx_http_health_check_abort(probe, (u_char *) "out of memory");
             return;
         }
 
@@ -400,7 +489,7 @@ ngx_http_health_check_recv(ngx_event_t *rev)
 
             p = ngx_palloc(probe->pool, size);
             if (p == NULL) {
-                ngx_http_health_check_finish(probe, (u_char *) "out of memory");
+                ngx_http_health_check_abort(probe, (u_char *) "out of memory");
                 return;
             }
 
@@ -414,7 +503,8 @@ ngx_http_health_check_recv(ngx_event_t *rev)
 
         if (n == NGX_AGAIN) {
             if (ngx_handle_read_event(rev, 0) != NGX_OK) {
-                ngx_http_health_check_finish(probe, (u_char *) "recv() failed");
+                ngx_http_health_check_abort(probe,
+                                            (u_char *) "cannot wait to read");
             }
             return;
         }
@@ -657,7 +747,7 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
     rc = ngx_http_health_check_parse(probe, 1);
 
     if (rc == NGX_ABORT) {
-        ngx_http_health_check_finish(probe, (u_char *) "out of memory");
+        ngx_http_health_check_abort(probe, (u_char *) "out of memory");
         return;
     }
 
@@ -721,11 +811,6 @@ ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
     check = probe->check;
     up = check->upstream;
     bit = (uint64_t) 1 << check->index;
-
-    if (probe->pc.connection) {
-        ngx_close_connection(probe->pc.connection);
-        probe->pc.connection = NULL;
-    }
 
     st = up->peers->elts;
     for (i = 0; i < up->peers->nelts; i++) {
@@ -816,10 +901,58 @@ ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
 
 done:
 
+    ngx_http_health_check_close(probe);
+}
+
+
+/*
+ * The probe couldn't be carried out for a reason of worker 0's own, such as
+ * no free connection or no memory: that says nothing about the server, whose
+ * state is left as it was.
+ */
+
+static void
+ngx_http_health_check_abort(ngx_http_health_check_probe_t *probe,
+    u_char *reason)
+{
+    ngx_http_health_check_t  *check;
+
+    check = probe->check;
+
+    ngx_log_error(NGX_LOG_ERR, check->timer.log, 0,
+                  "peer %V in upstream \"%V\" not checked, state unchanged: "
+                  "%s (health_check in %V:%ui)",
+                  &probe->name, &check->upstream->uscf->host, reason,
+                  &check->file, check->line);
+
+    ngx_http_health_check_close(probe);
+}
+
+
+/* Frees the probe, starts waiting ones, and schedules the next round. */
+
+static void
+ngx_http_health_check_close(ngx_http_health_check_probe_t *probe)
+{
+    ngx_http_health_check_t  *check;
+
+    check = probe->check;
+
+    if (probe->pc.connection) {
+        ngx_close_connection(probe->pc.connection);
+        probe->pc.connection = NULL;
+    }
+
+    if (probe->started) {
+        ngx_http_health_check_active--;
+    }
+
     ngx_destroy_pool(probe->pool);
 
     if (--check->pending == 0 && !ngx_exiting && !ngx_quit && !ngx_terminate)
     {
         ngx_add_timer(&check->timer, check->interval);
     }
+
+    ngx_http_health_check_start();
 }

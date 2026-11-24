@@ -34,7 +34,10 @@
  * (peers->tries) in step, as nginx does for "down" servers. Servers marked
  * "down" in the configuration are never checked or brought up. Fails and
  * passes are fixed at 1, servers start healthy, and probes use the
- * location's proxy_connect/send/read timeouts and Host $proxy_host.
+ * location's proxy_connect/send/read timeouts and Host $proxy_host. At most
+ * a quarter of worker_connections probes run at a time; a probe that cannot
+ * run for a reason of worker 0's own (no free connection, no memory) leaves
+ * the server's state as it was.
  *
  * Source files:
  *
@@ -484,6 +487,8 @@ ngx_http_health_check_init_process(ngx_cycle_t *cycle)
     if (hmcf == NULL) {
         return NGX_OK;
     }
+
+    ngx_http_health_check_probe_init(cycle);
 
     ups = hmcf->upstreams.elts;
     for (i = 0; i < hmcf->upstreams.nelts; i++) {
