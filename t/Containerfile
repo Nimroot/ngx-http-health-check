@@ -1,0 +1,52 @@
+# Test image: nginx built from source with this module, plus dnsmasq for the
+# "resolve" tests. Build context: the repository root (see the Makefile).
+
+ARG ALPINE_VERSION=3.24.4
+ARG NGINX_VERSION=1.30.6
+
+FROM docker.io/library/alpine:${ALPINE_VERSION} AS builder
+ARG NGINX_VERSION
+
+RUN apk add --no-cache \
+      gcc git linux-headers make musl-dev openssl-dev pcre2-dev zlib-dev
+
+WORKDIR /build
+RUN git clone --depth 1 --branch "release-${NGINX_VERSION}" \
+      https://github.com/nginx/nginx.git
+
+COPY config /build/module/
+COPY src/ /build/module/src/
+
+WORKDIR /build/nginx
+RUN ./auto/configure \
+      --prefix=/etc/nginx \
+      --sbin-path=/usr/sbin/nginx \
+      --modules-path=/usr/lib/nginx/modules \
+      --conf-path=/etc/nginx/nginx.conf \
+      --error-log-path=/dev/stderr \
+      --http-log-path=/dev/stdout \
+      --pid-path=/tmp/nginx.pid \
+      --lock-path=/tmp/nginx.lock \
+      --http-client-body-temp-path=/tmp/client_temp \
+      --http-proxy-temp-path=/tmp/proxy_temp \
+      --http-fastcgi-temp-path=/tmp/fastcgi_temp \
+      --http-uwsgi-temp-path=/tmp/uwsgi_temp \
+      --http-scgi-temp-path=/tmp/scgi_temp \
+      --user=nginx --group=nginx \
+      --with-compat --with-http_ssl_module \
+      --add-dynamic-module=../module \
+ && make -j"$(nproc)" \
+ && make install DESTDIR=/out \
+ && ln -s /usr/lib/nginx/modules /out/etc/nginx/modules
+
+FROM docker.io/library/alpine:${ALPINE_VERSION}
+RUN apk add --no-cache dnsmasq libcrypto3 libssl3 pcre2 zlib \
+ && addgroup -S nginx \
+ && adduser -S -D -H -G nginx -h /nonexistent -s /sbin/nologin nginx
+COPY --from=builder /out/usr/sbin/nginx /usr/sbin/nginx
+COPY --from=builder /out/usr/lib/nginx/modules/ /usr/lib/nginx/modules/
+COPY --from=builder /out/etc/nginx/ /etc/nginx/
+COPY t/nginx.conf /etc/nginx/nginx.conf
+COPY t/entrypoint.sh /entrypoint.sh
+STOPSIGNAL SIGQUIT
+ENTRYPOINT ["/entrypoint.sh"]
