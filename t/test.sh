@@ -391,8 +391,8 @@ logged "tls: name mismatch fails" \
 logged "tls: unknown CA fails" \
        'peer 127.0.0.1:9402 in upstream "hc_tls_ca" is unhealthy: SSL certificate verify error'
 
-# --- more servers than connection slots --------------------------------------------
-# A second nginx in the container: 40 probes per round (the same healthy
+# --- second nginx instances ----------------------------------------------------------
+# More servers than connection slots: 40 probes per round (the same healthy
 # server, 40 times), 16 worker_connections. Probes that would not fit must
 # wait for a slot, not fail the server.
 
@@ -411,6 +411,25 @@ sleep 4
 is "many: server still in use" "$(cx "wget -qO- http://127.0.0.1:18990/ 2>&1")" 9101
 is "many: no probe failed for lack of connections" "$(cx "grep -c 'is unhealthy' /tmp/many/error.log")" 0
 cx "nginx -c /tmp/many/nginx.conf -s quit"
+
+# A worker that shuts down with a probe in progress (9302 never answers)
+# closes it, rather than leaving its socket open.
+
+echo "shutdown with a probe in progress"
+extra_nginx /tmp/quit <<EOF
+    upstream stall {
+        zone stall 256k;
+        server 127.0.0.1:9302;
+    }
+    server {
+        listen 127.0.0.1:18991;
+        location / { proxy_pass http://stall; health_check interval=1s uri=/health; }
+    }
+EOF
+sleep 2
+cx "nginx -c /tmp/quit/nginx.conf -s quit && timeout 10 sh -c 'while [ -f /tmp/quit/nginx.pid ]; do sleep 0.2; done'"
+is "quit: exits within 10s"                    "$(cx "[ -f /tmp/quit/nginx.pid ] && echo running || echo exited")" exited
+is "quit: no socket left open"                 "$(cx "grep -c 'open socket' /tmp/quit/error.log")" 0
 
 # --- configuration errors ---------------------------------------------------------
 

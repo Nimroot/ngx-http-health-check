@@ -125,6 +125,7 @@ ngx_int_t ngx_http_hc_response_recv(ngx_http_hc_response_t *resp,
     ngx_connection_t *c);
 
 ngx_int_t ngx_http_hc_init_process(ngx_cycle_t *cycle);
+void ngx_http_hc_exit_process(ngx_cycle_t *cycle);
 
 
 #endif /* _NGX_HTTP_HEALTH_CHECK_H_INCLUDED_ */

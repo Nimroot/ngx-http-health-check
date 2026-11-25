@@ -164,7 +164,8 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 - At most a quarter of `worker_connections` checks have a connection at a
   time; the others wait for their turn. A check that worker 0 cannot carry
   out for a reason of its own (no free connection, out of memory) leaves the
-  server's state as it was and logs an `error`.
+  server's state as it was and logs an `error`. A worker that shuts down
+  closes its checks in progress.
 - A change of state is logged: `warn` with the reason when a check fails,
   `notice` when it passes again:
 
@@ -253,6 +254,7 @@ where requests go:
 - `https://` checks: SNI, verification against a private CA, and failures
   for a certificate for another name or from another CA;
 - more servers than free connections in worker 0 don't make any check fail;
+  a worker that shuts down with a check in progress leaves no socket open;
 - log messages; and `nginx -t` accepts valid configurations and rejects each
   unsupported or invalid one with a clear message.
 

@@ -85,7 +85,7 @@ ngx_module_t  ngx_http_health_check_module = {
     ngx_http_hc_init_process,              /* init process */
     NULL,                                  /* init thread */
     NULL,                                  /* exit thread */
-    NULL,                                  /* exit process */
+    ngx_http_hc_exit_process,              /* exit process */
     NULL,                                  /* exit master */
     NGX_MODULE_V1_PADDING
 };

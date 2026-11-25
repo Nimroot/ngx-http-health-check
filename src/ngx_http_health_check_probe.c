@@ -57,11 +57,12 @@ static u_char *ngx_http_hc_log_error(ngx_log_t *log, u_char *buf,
     size_t len);
 
 
-/* worker 0's probes waiting for a connection */
-static ngx_queue_t  ngx_http_hc_waiting;
-static ngx_uint_t   ngx_http_hc_active;
-static ngx_uint_t   ngx_http_hc_max_active;
-static ngx_uint_t   ngx_http_hc_starting;
+/* worker 0's checks, and its probes waiting for a connection */
+static ngx_http_hc_main_conf_t  *ngx_http_hc_running;
+static ngx_queue_t               ngx_http_hc_waiting;
+static ngx_uint_t                ngx_http_hc_active;
+static ngx_uint_t                ngx_http_hc_max_active;
+static ngx_uint_t                ngx_http_hc_starting;
 
 
 ngx_int_t
@@ -83,6 +84,7 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
+    ngx_http_hc_running = hmcf;
     ngx_queue_init(&ngx_http_hc_waiting);
 
     /* the rest is left to client connections */
@@ -103,6 +105,31 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
     }
 
     return NGX_OK;
+}
+
+
+/*
+ * A worker that shuts down doesn't wait for probes: closes them before
+ * nginx looks for sockets left open. The servers keep their state.
+ */
+
+void
+ngx_http_hc_exit_process(ngx_cycle_t *cycle)
+{
+    ngx_uint_t      i;
+    ngx_http_hc_t  *hc;
+
+    if (ngx_http_hc_running == NULL) {
+        return;
+    }
+
+    hc = ngx_http_hc_running->checks.elts;
+
+    for (i = 0; i < ngx_http_hc_running->checks.nelts; i++) {
+        while (hc[i].probes.root != hc[i].probes.sentinel) {
+            ngx_http_hc_close((ngx_http_hc_probe_t *) hc[i].probes.root);
+        }
+    }
 }
 
 
