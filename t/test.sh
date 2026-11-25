@@ -228,6 +228,39 @@ logged "reason: TLS instead of HTTP" 'is unhealthy: TLS data instead of an HTTP 
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 expect "raw: healthy at the end"               /raw/ ok
 
+# hc_raw11 probes the same socat with HTTP/1.1 (nginx's default
+# proxy_http_version) and match body ~ "^ok$", which the chunks fail.
+
+echo "chunked responses (HTTP/1.1 probes)"
+expect "raw11: complete response passes"       /raw11/ ok
+since=$(date +%s)
+raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nok\n\r\n'
+expect "raw11: no last chunk fails"            /raw11/ 9102
+logged "reason: incomplete chunked body" \
+       'peer 127.0.0.1:9301 in upstream "hc_raw11" is unhealthy: connection closed before the response body was complete'
+raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\no\r\n2\r\nk\n\r\n0\r\n\r\n'
+expect "raw11: chunks decoded, healthy again"  /raw11/ ok
+expect "raw: HTTP/1.0 probe rejects chunked"   /raw/ 9102
+since=$(date +%s)
+raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n3\r\nok\n\r\n0\r\n\r\n'
+expect "raw11: with Content-Length fails"      /raw11/ 9102
+logged "reason: both lengths" 'is unhealthy: both Content-Length and Transfer-Encoding'
+raw 'HTTP/1.1 200 OK\r\nTRANSFER-ENCODING: Chunked\r\n\r\n3;a=b\r\nok\n\r\n0\r\nX-Trailer: 1\r\n\r\n'
+expect "raw11: extensions, trailers: healthy"  /raw11/ ok
+since=$(date +%s)
+raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n'
+expect "raw11: other transfer coding fails"    /raw11/ 9102
+logged "reason: unsupported coding" 'upstream "hc_raw11" is unhealthy: unsupported Transfer-Encoding'
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw11: plain response: healthy"        /raw11/ ok
+since=$(date +%s)
+raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nok\n\r\n0\r\n\r\n'
+expect "raw11: invalid chunk size fails"       /raw11/ 9102
+logged "reason: invalid chunked body" 'upstream "hc_raw11" is unhealthy: invalid chunked body'
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw11: healthy at the end"             /raw11/ ok
+expect "raw: healthy at the end too"           /raw/ ok
+
 echo "HTTP version"
 since=0
 logged "1.0 probe gets 426 where 1.1 is needed" \

@@ -139,10 +139,14 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   (`service=`), whose names are those of the records' targets.
 - A response passes only if it is complete: a response with status 1xx, 204
   or 304 ends with its header; any other body ends after `Content-Length`
-  bytes (or the first 256k of them), or when the server closes the
-  connection if there is no `Content-Length`. A connection closed early,
-  `Content-Length` headers with different values, `Transfer-Encoding`, or a
-  header line with space before its colon fail the check.
+  bytes (or the first 256k of them), with the last chunk of a
+  `Transfer-Encoding: chunked` body (in answer to HTTP/1.1; `match` sees the
+  decoded data), or when the server closes the connection if there is
+  neither. As with nginx's proxy, a connection closed early,
+  `Content-Length` headers with different values, `Content-Length` with
+  `Transfer-Encoding`, a transfer coding other than `chunked` alone, an
+  invalid chunk, or a header line with space before its colon fail the
+  check.
 - At most a quarter of `worker_connections` probes run at once; the others
   wait for their turn. A probe that worker 0 cannot carry out for a reason
   of its own (no free connection, out of memory) leaves the server's state
@@ -175,8 +179,8 @@ not from testing against NGINX Plus.
 ## Limitations
 
 - **Worker 0 runs all checks.** If it is busy or stuck, checks are delayed.
-- **The response must be HTTP/1.x without `Transfer-Encoding`**, such as
-  chunked.
+- **The response must be HTTP/1.x**, with no transfer coding other than
+  `chunked` (none at all in answer to HTTP/1.0).
 - **The response header is limited to 32k.** A larger one fails the check.
 - **https:** a check has no request to take variables from, so
   `proxy_ssl_name` and `proxy_ssl_certificate` (and its key) must be fixed
@@ -218,8 +222,9 @@ where requests go:
   socat; responses without a body or delimited by closing pass; a connection
   closed without a response, or TLS data in answer to `http://`, fail with a
   reason saying so;
-- an HTTP/1.0 check failing on a server that answers HTTP/1.0 with 426, as
-  Envoy does by default, where an HTTP/1.1 check passes;
+- HTTP/1.1 checks: chunked bodies decoded for `match`, incomplete or
+  invalid ones failing; an HTTP/1.0 check failing on a server that answers
+  HTTP/1.0 with 426, as Envoy does by default;
 - `https://` checks: SNI, verification against a private CA, and failures
   for a certificate for another name or from another CA;
 - more servers than free connections in worker 0 don't make any check fail;

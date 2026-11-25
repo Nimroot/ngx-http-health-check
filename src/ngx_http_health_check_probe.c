@@ -51,6 +51,7 @@ struct ngx_http_health_check_probe_s {
 
     unsigned                            started:1;
     unsigned                            bodyless:1;
+    unsigned                            chunked:1;
 };
 
 
@@ -77,6 +78,8 @@ static void ngx_http_health_check_recv(ngx_event_t *rev);
 static void ngx_http_health_check_dummy(ngx_event_t *ev);
 static ngx_int_t ngx_http_health_check_parse(
     ngx_http_health_check_probe_t *probe, ngx_uint_t store);
+static ngx_int_t ngx_http_health_check_dechunk(
+    ngx_http_health_check_probe_t *probe, u_char *out, size_t *len);
 static void ngx_http_health_check_evaluate(
     ngx_http_health_check_probe_t *probe);
 static void ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
@@ -706,6 +709,22 @@ ngx_http_health_check_recv(ngx_event_t *rev)
             return;
         }
 
+        if (rc == NGX_OK && probe->chunked && !probe->bodyless) {
+            rc = ngx_http_health_check_dechunk(probe, NULL, &body);
+
+            if (rc == NGX_ERROR) {
+                ngx_http_health_check_finish(probe, probe->error);
+                return;
+            }
+
+            if (rc == NGX_OK) {
+                ngx_http_health_check_evaluate(probe);
+                return;
+            }
+
+            continue;
+        }
+
         if (rc == NGX_OK) {
             body = b->last - b->start - probe->header_len;
 
@@ -738,10 +757,12 @@ ngx_http_health_check_dummy(ngx_event_t *ev)
  *
  * The body of a response with status 1xx, 204 or 304 is empty, whatever
  * its header says (RFC 9112, 6.3). Any other body is delimited by
- * Content-Length or by the end of the connection: Transfer-Encoding (such
- * as chunked) isn't supported, and several different Content-Length values,
- * or a field name the server may have meant as Content-Length but isn't,
- * make the length ambiguous.
+ * Content-Length, by "Transfer-Encoding: chunked" in answer to an HTTP/1.1
+ * request, or by the end of the connection. As for nginx's proxy, any other
+ * transfer coding, a second Transfer-Encoding, or one with Content-Length
+ * is an error; so are several different Content-Length values, or a field
+ * name the server may have meant as Content-Length but isn't, which make
+ * the length ambiguous.
  */
 
 static ngx_int_t
@@ -760,6 +781,7 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
 
     probe->content_length = -1;
     probe->bodyless = 0;
+    probe->chunked = 0;
     probe->error = (u_char *) "invalid response header";
 
     if (store) {
@@ -827,6 +849,12 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
         }
 
         if (end == line) {
+            if (probe->chunked && probe->content_length >= 0) {
+                probe->error = (u_char *)
+                               "both Content-Length and Transfer-Encoding";
+                return NGX_ERROR;
+            }
+
             probe->header_len = p - b->start;
             probe->error = NULL;
             return NGX_OK;
@@ -882,8 +910,18 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
                                sizeof("Transfer-Encoding") - 1)
                == 0)
         {
-            probe->error = (u_char *) "unsupported Transfer-Encoding";
-            return NGX_ERROR;
+            if (!probe->check->http11
+                || probe->chunked
+                || end - v != sizeof("chunked") - 1
+                || ngx_strncasecmp(v, (u_char *) "chunked",
+                                   sizeof("chunked") - 1)
+                   != 0)
+            {
+                probe->error = (u_char *) "unsupported Transfer-Encoding";
+                return NGX_ERROR;
+            }
+
+            probe->chunked = 1;
         }
 
         if (store) {
@@ -903,6 +941,143 @@ too_large:
 
     probe->error = (u_char *) "response header too large";
     return NGX_ERROR;
+}
+
+
+/*
+ * Decodes the chunked body that follows the header (RFC 9112, 7.1). NGX_OK
+ * once the last chunk and the trailer section have arrived, or once
+ * NGX_HTTP_HEALTH_CHECK_BODY_MAX bytes of data have; NGX_AGAIN until then;
+ * NGX_ERROR (with probe->error) if the body is invalid. Sets *len to the
+ * bytes of data decoded, at most NGX_HTTP_HEALTH_CHECK_BODY_MAX, and copies
+ * them to "out" unless it's NULL. Chunk extensions and trailer fields are
+ * skipped.
+ */
+
+static ngx_int_t
+ngx_http_health_check_dechunk(ngx_http_health_check_probe_t *probe,
+    u_char *out, size_t *len)
+{
+    off_t       size;
+    size_t      n, total;
+    u_char     *p, *q, *nl, *last, c;
+    ngx_buf_t  *b;
+
+    b = &probe->buf;
+    p = b->start + probe->header_len;
+    last = b->last;
+    total = 0;
+
+    probe->error = (u_char *) "invalid chunked body";
+
+    for ( ;; ) {
+
+        /* chunk-size [ chunk-ext ] CRLF */
+
+        nl = ngx_strlchr(p, last, LF);
+
+        if (nl == NULL) {
+            if (last - p > 1024) {
+                return NGX_ERROR;
+            }
+
+            goto again;
+        }
+
+        size = 0;
+
+        for (q = p; q < nl; q++) {
+            c = (u_char) (*q | 0x20);
+
+            if (*q >= '0' && *q <= '9') {
+                c = *q - '0';
+
+            } else if (c >= 'a' && c <= 'f') {
+                c = c - 'a' + 10;
+
+            } else {
+                break;
+            }
+
+            if (size > (NGX_MAX_OFF_T_VALUE - 15) / 16) {
+                return NGX_ERROR;
+            }
+
+            size = size * 16 + c;
+        }
+
+        if (q == p
+            || (q < nl && *q != ';' && *q != ' ' && *q != '\t'
+                && !(*q == CR && q + 1 == nl)))
+        {
+            return NGX_ERROR;
+        }
+
+        p = nl + 1;
+
+        if (size == 0) {
+            break;
+        }
+
+        /* chunk-data */
+
+        n = (size_t) ngx_min(size, last - p);
+        n = ngx_min(n, NGX_HTTP_HEALTH_CHECK_BODY_MAX - total);
+
+        if (out) {
+            ngx_memcpy(out + total, p, n);
+        }
+
+        total += n;
+
+        if (total == NGX_HTTP_HEALTH_CHECK_BODY_MAX) {
+            *len = total;
+            return NGX_OK;
+        }
+
+        if (last - p < size) {
+            goto again;
+        }
+
+        p += size;
+
+        /* CRLF */
+
+        if (p < last && *p == CR) {
+            p++;
+        }
+
+        if (p == last) {
+            goto again;
+        }
+
+        if (*p++ != LF) {
+            return NGX_ERROR;
+        }
+    }
+
+    /* trailer section, up to an empty line */
+
+    for ( ;; ) {
+        nl = ngx_strlchr(p, last, LF);
+
+        if (nl == NULL) {
+            goto again;
+        }
+
+        if (nl == p || (nl == p + 1 && *p == CR)) {
+            *len = total;
+            probe->error = NULL;
+            return NGX_OK;
+        }
+
+        p = nl + 1;
+    }
+
+again:
+
+    *len = total;
+    return NGX_AGAIN;
 }
 
 
@@ -941,6 +1116,37 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
 
     if (probe->bodyless) {
         len = 0;
+
+    } else if (probe->chunked) {
+
+        body.data = ngx_pnalloc(probe->pool,
+                                ngx_min(len, NGX_HTTP_HEALTH_CHECK_BODY_MAX));
+        if (body.data == NULL) {
+            ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+            return;
+        }
+
+        rc = ngx_http_health_check_dechunk(probe, body.data, &len);
+
+        if (rc == NGX_ERROR) {
+            ngx_http_health_check_finish(probe, probe->error);
+            return;
+        }
+
+        /*
+         * Incomplete: the connection was closed, or the buffer is full of
+         * chunks too small to have made the first 256k of data; those are
+         * judged as they are.
+         */
+
+        if (rc == NGX_AGAIN
+            && probe->buf.last - probe->buf.start
+               < NGX_HTTP_HEALTH_CHECK_BUF_MAX)
+        {
+            ngx_http_health_check_finish(probe, (u_char *)
+                  "connection closed before the response body was complete");
+            return;
+        }
 
     } else if (probe->content_length >= 0) {
 
