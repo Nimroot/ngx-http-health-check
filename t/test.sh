@@ -299,8 +299,8 @@ raw "$ok_resp"
 expect "raw: complete response passes again"   /raw/ ok
 raw 'HTTP/1.1 200 OK\r\nContent-Length : 100\r\n\r\nok\n'
 expect "raw: whitespace before colon fails"    /raw/ 9102
-raw "$ok_resp"
-expect "raw: complete response passes once more" /raw/ ok
+raw 'HTTP/1.1 103 Early Hints\r\nLink: </s.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: 103 Early Hints skipped, 200 passes" /raw/ ok
 since=$(date +%s)
 raw "HTTP/1.1 200 OK\r\nX-Pad: $(printf '%01500d' 0)\r\nContent-Length: 3\r\n\r\nok\n"
 expect "raw: header over proxy_buffer_size fails" /raw/ 9102

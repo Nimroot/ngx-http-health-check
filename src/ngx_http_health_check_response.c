@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Reading and parsing the response to a probe with nginx's own parsers, as
- * the proxy does: the status line, the header lines, and the body as framed
- * by Content-Length, by chunked Transfer-Encoding, or by the end of the
- * connection.
+ * the proxy does: the status line (interim 1xx responses are skipped), the
+ * header lines, and the body as framed by Content-Length, by chunked
+ * Transfer-Encoding, or by the end of the connection.
  *
  * The header must fit in the buffer (proxy_buffer_size, as for requests);
  * the buffer is then reused for the body, which only passes through: only
@@ -127,7 +127,7 @@ ngx_http_hc_response_recv(ngx_http_hc_response_t *resp, ngx_connection_t *c)
 }
 
 
-/* Ready to read a response. */
+/* Ready for a response: the first one, or the one after an interim one. */
 
 static void
 ngx_http_hc_response_reset(ngx_http_hc_response_t *resp)
@@ -184,6 +184,13 @@ ngx_http_hc_response_parse(ngx_http_hc_response_t *resp)
             }
 
             code = resp->status.code;
+
+            /* an interim response (RFC 9110, 15.2): the final one follows */
+
+            if (code < 200 && code != 101) {
+                ngx_http_hc_response_reset(resp);
+                break;
+            }
 
             if (code < 200 || code == 204 || code == 304
                 || resp->content_length == 0)
