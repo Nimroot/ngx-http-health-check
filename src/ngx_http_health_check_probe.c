@@ -739,10 +739,9 @@ ngx_http_health_check_dummy(ngx_event_t *ev)
  * The body of a response with status 1xx, 204 or 304 is empty, whatever
  * its header says (RFC 9112, 6.3). Any other body is delimited by
  * Content-Length or by the end of the connection: Transfer-Encoding (such
- * as chunked, which a server must not use in answer to an HTTP/1.0 request)
- * isn't supported, and several different Content-Length values, or a field
- * name the server may have meant as Content-Length but isn't, make the
- * length ambiguous.
+ * as chunked) isn't supported, and several different Content-Length values,
+ * or a field name the server may have meant as Content-Length but isn't,
+ * make the length ambiguous.
  */
 
 static ngx_int_t

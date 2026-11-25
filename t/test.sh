@@ -228,8 +228,14 @@ logged "reason: TLS instead of HTTP" 'is unhealthy: TLS data instead of an HTTP 
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 expect "raw: healthy at the end"               /raw/ ok
 
+echo "HTTP version"
+since=0
+logged "1.0 probe gets 426 where 1.1 is needed" \
+       'peer 127.0.0.1:9101 in upstream "hc_h10" is unhealthy: status 426 is not 2xx or 3xx'
+
 # --- https --------------------------------------------------------------------
-# tls.test: 9401 (needs SNI) with backup 9402, verified against test-ca.
+# tls.test: 9401 (needs SNI) with backup 9402, verified against test-ca,
+# probed with HTTP/1.1 on /health11 (426 for HTTP/1.0).
 # wrong.test and hc_tls_ca fail verification: their probes say why.
 
 echo "https"

@@ -113,10 +113,12 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 
 - Because of the `zone`, the group's servers live in shared memory, seen by
   every worker. Worker 0 runs all checks.
-- A check opens a new connection to each server and sends
-  `GET <uri> HTTP/1.0`, with `Host:` set to the group name (Plus's default
-  `$proxy_host`) and `Connection: close`. It uses the location's
-  `proxy_connect_timeout`, `proxy_send_timeout` and `proxy_read_timeout`.
+- A check opens a new connection to each server and sends `GET <uri>` with
+  the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
+  `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is set to the
+  group name (Plus's default `$proxy_host`), plus `Connection: close`. It
+  uses the location's `proxy_connect_timeout`, `proxy_send_timeout` and
+  `proxy_read_timeout`.
 - With `proxy_pass https://`, the check does a TLS handshake first, with the
   location's settings as requests do: `proxy_ssl_protocols`,
   `proxy_ssl_ciphers`, `proxy_ssl_certificate` and
@@ -162,7 +164,7 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 | `require` in `match` | supported | config error |
 | `proxy_pass https://` | supported | supported; `proxy_ssl_name` and `proxy_ssl_certificate` with variables are a config error |
 | `fastcgi_pass`, `grpc_pass`, `uwsgi_pass`, ... | supported | `proxy_pass` only |
-| Check request | uses the location's `proxy_set_header` and `proxy_http_version` | fixed request, see [How it works](#how-it-works) |
+| Check request | uses the location's `proxy_set_header` and `proxy_http_version` | uses `proxy_http_version` (HTTP/1.x only); fixed headers, see [How it works](#how-it-works) |
 | Who runs the checks | the workers | worker 0 |
 | Health state | API and dashboard | log only |
 
@@ -173,8 +175,8 @@ not from testing against NGINX Plus.
 ## Limitations
 
 - **Worker 0 runs all checks.** If it is busy or stuck, checks are delayed.
-- **The response must be HTTP/1.x without `Transfer-Encoding`** (such as
-  chunked, which a server answering an HTTP/1.0 request must not use).
+- **The response must be HTTP/1.x without `Transfer-Encoding`**, such as
+  chunked.
 - **The response header is limited to 32k.** A larger one fails the check.
 - **https:** a check has no request to take variables from, so
   `proxy_ssl_name` and `proxy_ssl_certificate` (and its key) must be fixed
@@ -216,6 +218,8 @@ where requests go:
   socat; responses without a body or delimited by closing pass; a connection
   closed without a response, or TLS data in answer to `http://`, fail with a
   reason saying so;
+- an HTTP/1.0 check failing on a server that answers HTTP/1.0 with 426, as
+  Envoy does by default, where an HTTP/1.1 check passes;
 - `https://` checks: SNI, verification against a private CA, and failures
   for a certificate for another name or from another CA;
 - more servers than free connections in worker 0 don't make any check fail;

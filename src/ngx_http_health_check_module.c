@@ -28,8 +28,9 @@
  *
  * How it works: health_check needs the upstream to have a "zone", so its
  * servers live in shared memory and are seen by every worker. Worker 0 sends
- * "GET <uri> HTTP/1.0" to every server of the group every interval and sets
- * the server's "down" flag from the result, which every load-balancing
+ * "GET <uri> HTTP/1.x" (proxy_http_version: 1.0, or 1.1 for 1.1 and 2) to
+ * every server of the group every interval and sets the server's "down"
+ * flag from the result, which every load-balancing
  * method already honours; it keeps the group's count of usable servers
  * (peers->tries) in step, as nginx does for "down" servers. Servers marked
  * "down" in the configuration are never checked or brought up. Fails and
@@ -454,12 +455,16 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
         check->send_timeout = ucf->send_timeout;
         check->read_timeout = ucf->read_timeout;
 
-        /* Host is $proxy_host, the upstream group's name */
+        /*
+         * Host is $proxy_host, the upstream group's name. HTTP/2 isn't
+         * spoken by probes: with proxy_http_version 2 they use HTTP/1.1.
+         */
 
         host = &uscf->host;
+        check->http11 = (plcf->http_version >= NGX_HTTP_VERSION_11);
 
         len = sizeof("GET ") - 1 + check->uri.len
-              + sizeof(" HTTP/1.0" CRLF "Host: ") - 1 + host->len
+              + sizeof(" HTTP/1.x" CRLF "Host: ") - 1 + host->len
               + sizeof(CRLF "Connection: close" CRLF CRLF) - 1;
 
         p = ngx_pnalloc(cf->pool, len);
@@ -468,10 +473,11 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
         }
 
         check->request.data = p;
-        check->request.len = ngx_sprintf(p, "GET %V HTTP/1.0" CRLF
+        check->request.len = ngx_sprintf(p, "GET %V HTTP/1.%c" CRLF
                                             "Host: %V" CRLF
                                             "Connection: close" CRLF CRLF,
-                                         &check->uri, host)
+                                         &check->uri,
+                                         check->http11 ? '1' : '0', host)
                              - p;
     }
 
