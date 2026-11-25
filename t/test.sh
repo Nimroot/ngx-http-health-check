@@ -214,6 +214,18 @@ logged "reason: Transfer-Encoding" 'is unhealthy: unsupported Transfer-Encoding'
 raw 'HTTP/1.1 200 OK\r\nContent-Length : 100\r\n\r\nok\n'
 expect "raw: whitespace before colon fails"    /raw/ 9102
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: complete response passes once more" /raw/ ok
+since=$(date +%s)
+raw ''
+expect "raw: closed without a response fails"  /raw/ 9102
+logged "reason: no response" 'is unhealthy: connection closed without a response'
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: complete response passes yet again" /raw/ ok
+since=$(date +%s)
+raw '\025\003\003\000\002\002\106'
+expect "raw: TLS alert fails"                  /raw/ 9102
+logged "reason: TLS instead of HTTP" 'is unhealthy: TLS data instead of an HTTP response'
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 expect "raw: healthy at the end"               /raw/ ok
 
 # --- more servers than connection slots --------------------------------------------

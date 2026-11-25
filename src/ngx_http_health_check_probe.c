@@ -607,6 +607,14 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
         }
     }
 
+    /* a TLS record (alert, handshake...): http:// to an https server */
+
+    if (b->last > b->start && *b->start >= 0x14 && *b->start <= 0x17) {
+        probe->error = (u_char *) "TLS data instead of an HTTP response "
+                                  "(an https server?)";
+        return NGX_ERROR;
+    }
+
     for ( ;; ) {
         nl = ngx_strlchr(p, b->last, LF);
 
@@ -753,7 +761,10 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
 
     if (rc == NGX_AGAIN) {
         ngx_http_health_check_finish(probe,
-                                     (u_char *) "incomplete response header");
+                                     probe->buf.last == probe->buf.start
+                                     ? (u_char *) "connection closed "
+                                                  "without a response"
+                                     : (u_char *) "incomplete response header");
         return;
     }
 

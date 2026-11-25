@@ -199,7 +199,9 @@ where requests go:
   serves the changing answers); an SRV server marked `down` gets neither
   probes nor requests;
 - incomplete or ambiguously delimited responses fail, served byte for byte by
-  socat; responses without a body or delimited by closing pass;
+  socat; responses without a body or delimited by closing pass; a connection
+  closed without a response, or TLS data in answer to `http://`, fail with a
+  reason saying so;
 - more servers than free connections in worker 0 don't make any check fail;
 - log messages; and `nginx -t` accepts valid configurations and rejects each
   unsupported or invalid one with a clear message.
