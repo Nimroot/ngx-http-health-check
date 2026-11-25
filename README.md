@@ -135,8 +135,9 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   (`service=`). A server marked `drain` is checked like any other: while it
   is unhealthy, it gets no requests at all, not even from clients bound to
   it by `sticky`.
-- A check opens a new connection to the server and sends `GET <uri>` with
-  the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
+- A check opens a new connection to the server, from the location's
+  `proxy_bind` address if it is set without variables, and sends `GET <uri>`
+  with the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
   `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is
   `$proxy_host` (the group's name), plus `Connection: close`.
 - Timeouts are the location's, as for requests: `proxy_connect_timeout` to
@@ -197,7 +198,7 @@ not from testing against NGINX Plus.
 - **The response must be HTTP/1.x.**
 - **No variables:** a check has no request to evaluate them for, so
   `proxy_ssl_name` and `proxy_ssl_certificate` (and its key) must be fixed
-  strings.
+  strings, and with variables in `proxy_bind`, checks don't bind.
 - **https:** ALPN isn't sent.
 - **Zone size:** nginx's minimum for an upstream `zone` depends on the memory
   page size. The 64k used in many examples is too small on systems with 16k
@@ -246,6 +247,7 @@ where requests go:
 - chunked bodies decoded for `match`, incomplete or invalid ones failing; an
   HTTP/1.0 check failing on a server that answers HTTP/1.0 with 426, as Envoy
   does by default;
+- checks come from the `proxy_bind` address;
 - a server that never answers fails on `proxy_read_timeout`, without delaying
   the checks of the other servers of its group;
 - `https://` checks: SNI, verification against a private CA, and failures

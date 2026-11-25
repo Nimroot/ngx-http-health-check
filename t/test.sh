@@ -351,10 +351,11 @@ raw "$ok_resp"
 expect "raw11: healthy at the end"             /raw11/ ok
 expect "raw: healthy at the end too"           /raw/ ok
 
-echo "HTTP version"
+echo "HTTP version, proxy_bind"
 since=0
 logged "1.0 probe gets 426 where 1.1 is needed" \
        'peer 127.0.0.1:9101 in upstream "hc_h10" is unhealthy: status 426 is not 2xx or 3xx'
+expect "bind: probes come from proxy_bind's address" /bind/ 9101
 
 # --- a server that never answers -------------------------------------------------
 # hc_slow has 9302, which never answers, and 9101. Each server is probed on
@@ -461,6 +462,8 @@ conf_test "https: proxy_ssl_name with a variable"   'with variables' \
     "$(srv 'location / { proxy_pass https://z; proxy_ssl_name $host; health_check; }')"
 conf_test "https: certificate with a variable"      'with variables' \
     "$(srv 'location / { proxy_pass https://z; proxy_ssl_certificate /c/$host.crt; proxy_ssl_certificate_key /c/$host.key; health_check; }')"
+conf_test "proxy_bind with a variable"              ok \
+    "$(srv 'location / { proxy_pass http://z; proxy_bind $remote_addr; health_check; }')"
 conf_test "unsupported parameter fails="            '"fails=3" is not supported' \
     "$(srv 'location / { proxy_pass http://z; health_check fails=3; }')"
 conf_test "unsupported parameter mandatory"         '"mandatory" is not supported' \

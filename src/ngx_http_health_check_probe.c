@@ -223,9 +223,10 @@ ngx_http_hc_start(void)
 static void
 ngx_http_hc_connect(ngx_http_hc_probe_t *p)
 {
-    ngx_int_t                  rc;
-    ngx_connection_t          *c;
-    ngx_http_upstream_conf_t  *conf;
+    ngx_int_t                   rc;
+    ngx_connection_t           *c;
+    ngx_http_upstream_conf_t   *conf;
+    ngx_http_upstream_local_t  *local;
 
     conf = p->check->conf;
 
@@ -245,6 +246,17 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *p)
     p->pc.get = ngx_event_get_peer;
     p->pc.log = &p->log;
     p->pc.log_error = NGX_ERROR_INFO;
+
+    /* proxy_bind with variables: no request to evaluate them for */
+
+    local = conf->local;
+
+    if (local && local->value == NULL) {
+        p->pc.local = local->addr;
+#if (NGX_HAVE_TRANSPARENT_PROXY)
+        p->pc.transparent = local->transparent;
+#endif
+    }
 
     rc = ngx_event_connect_peer(&p->pc);
 
