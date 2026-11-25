@@ -58,6 +58,16 @@ typedef struct {
     ngx_msec_t                          read_timeout;
     ngx_str_t                           request;
 
+#if (NGX_HTTP_SSL)
+    /* proxy_pass https://: the location's SSL context, NULL for http:// */
+    ngx_ssl_t                          *ssl;
+    /* name the certificate must match if ssl_verify, without a port */
+    ngx_str_t                           ssl_name;
+    /* sent as SNI, null-terminated; NULL if none */
+    u_char                             *ssl_server_name;
+    ngx_flag_t                          ssl_verify;
+#endif
+
     ngx_event_t                         timer;
     ngx_uint_t                          pending;
 } ngx_http_health_check_t;

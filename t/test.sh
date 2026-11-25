@@ -228,6 +228,26 @@ logged "reason: TLS instead of HTTP" 'is unhealthy: TLS data instead of an HTTP 
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 expect "raw: healthy at the end"               /raw/ ok
 
+# --- https --------------------------------------------------------------------
+# tls.test: 9401 (needs SNI) with backup 9402, verified against test-ca.
+# wrong.test and hc_tls_ca fail verification: their probes say why.
+
+echo "https"
+set_state
+expect "tls: SNI and verification pass, 9401"  /tls/ 9401
+since=$(date +%s); set_state "touch /tmp/hc/9401.fail"
+expect "tls: 9401 taken out, backup 9402"      /tls/ 9402
+logged "tls: reason is the status" \
+       'peer 127.0.0.1:9401 in upstream "tls.test" is unhealthy: status 503 is not 2xx or 3xx'
+since=$(date +%s); set_state
+expect "tls: 9401 back"                        /tls/ 9401
+logged "tls: healthy again" 'peer 127.0.0.1:9401 in upstream "tls.test" is healthy'
+since=0
+logged "tls: name mismatch fails" \
+       'peer 127.0.0.1:9402 in upstream "wrong.test" is unhealthy: SSL certificate does not match "wrong.test"'
+logged "tls: unknown CA fails" \
+       'peer 127.0.0.1:9402 in upstream "hc_tls_ca" is unhealthy: SSL certificate verify error'
+
 # --- more servers than connection slots --------------------------------------------
 # A second nginx in the container: 40 probes per round (the same healthy
 # server, 40 times), 16 worker_connections. Probes that would not fit must
@@ -300,8 +320,12 @@ conf_test "proxy_pass with a variable"              'needs "proxy_pass" to an up
     "$(srv 'location / { proxy_pass http://$host; health_check; }')"
 conf_test "no proxy_pass"                           'needs "proxy_pass" to an upstream group' \
     "$(srv 'location / { health_check; }')"
-conf_test "https upstream"                          'over https is not supported' \
+conf_test "https upstream"                          ok \
     "$(srv 'location / { proxy_pass https://z; health_check; }')"
+conf_test "https: proxy_ssl_name with a variable"   'cannot use "proxy_ssl_name" with variables' \
+    "$(srv 'location / { proxy_pass https://z; proxy_ssl_name $host; health_check; }')"
+conf_test "https: certificate with a variable"      'cannot use "proxy_ssl_certificate"' \
+    "$(srv 'location / { proxy_pass https://z; proxy_ssl_certificate /c/$host.crt; proxy_ssl_certificate_key /c/$host.key; health_check; }')"
 conf_test "unsupported parameter fails="            '"fails=3" is not supported' \
     "$(srv 'location / { proxy_pass http://z; health_check fails=3; }')"
 conf_test "unsupported parameter mandatory"         '"mandatory" is not supported' \

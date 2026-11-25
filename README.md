@@ -45,7 +45,9 @@ check passes again. If every server in the group is unhealthy, requests get 502.
   Older versions stop the build with an explicit error.
 - PCRE (for `~` tests) and the upstream zone module, both part of a default
   build.
-- An upstream group with a `zone`, used with `proxy_pass` (plain `http://`).
+- An upstream group with a `zone`, used with `proxy_pass` (`http://` or
+  `https://`).
+- For `https://`, nginx and the module built with `--with-http_ssl_module`.
 
 ## Building
 
@@ -115,6 +117,15 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   `GET <uri> HTTP/1.0`, with `Host:` set to the group name (Plus's default
   `$proxy_host`) and `Connection: close`. It uses the location's
   `proxy_connect_timeout`, `proxy_send_timeout` and `proxy_read_timeout`.
+- With `proxy_pass https://`, the check does a TLS handshake first, with the
+  location's settings as requests do: `proxy_ssl_protocols`,
+  `proxy_ssl_ciphers`, `proxy_ssl_certificate` and
+  `proxy_ssl_certificate_key`, `proxy_ssl_trusted_certificate` (such as a
+  private CA), `proxy_ssl_verify`, `proxy_ssl_server_name` (SNI) and
+  `proxy_ssl_name`, which defaults to the group name. The handshake must be
+  done within `proxy_connect_timeout`. A failed handshake or certificate
+  check fails the check, with the reason in the log. Each check does a full
+  handshake (no session reuse).
 - The result sets the server's `down` flag in shared memory. Every
   load-balancing method (round robin, `hash`, `ip_hash`, `least_conn`,
   `random`) already skips down servers. The module also keeps the group's
@@ -149,7 +160,7 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 | `fails=`, `passes=` | default 1 | always 1; setting them is a config error |
 | `jitter`, `mandatory`, `persistent`, `port`, `type=grpc`, `keepalive_time` | supported | config error |
 | `require` in `match` | supported | config error |
-| `proxy_pass https://` | supported | config error |
+| `proxy_pass https://` | supported | supported; `proxy_ssl_name` and `proxy_ssl_certificate` with variables are a config error |
 | `fastcgi_pass`, `grpc_pass`, `uwsgi_pass`, ... | supported | `proxy_pass` only |
 | Check request | uses the location's `proxy_set_header` and `proxy_http_version` | fixed request, see [How it works](#how-it-works) |
 | Who runs the checks | the workers | worker 0 |
@@ -165,6 +176,9 @@ not from testing against NGINX Plus.
 - **The response must be HTTP/1.x without `Transfer-Encoding`** (such as
   chunked, which a server answering an HTTP/1.0 request must not use).
 - **The response header is limited to 32k.** A larger one fails the check.
+- **https:** a check has no request to take variables from, so
+  `proxy_ssl_name` and `proxy_ssl_certificate` (and its key) must be fixed
+  strings. ALPN isn't sent.
 - **Zone size:** nginx's minimum for an upstream `zone` depends on the memory
   page size. The 64k used in many examples is too small on systems with 16k
   pages (some arm64 systems); 256k works there.
@@ -202,6 +216,8 @@ where requests go:
   socat; responses without a body or delimited by closing pass; a connection
   closed without a response, or TLS data in answer to `http://`, fail with a
   reason saying so;
+- `https://` checks: SNI, verification against a private CA, and failures
+  for a certificate for another name or from another CA;
 - more servers than free connections in worker 0 don't make any check fail;
 - log messages; and `nginx -t` accepts valid configurations and rejects each
   unsupported or invalid one with a clear message.

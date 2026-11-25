@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Probing the servers of a group and recording their health: worker 0
- * connects to each server, sends the check request, reads and parses the
- * response, has it judged by the match tests, and sets the server's "down"
- * flag in shared memory.
+ * connects to each server (and does the SSL handshake for https), sends the
+ * check request, reads and parses the response, has it judged by the match
+ * tests, and sets the server's "down" flag in shared memory.
  */
 
 
@@ -68,6 +68,10 @@ static void ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
     ngx_queue_t *list);
 static void ngx_http_health_check_start(void);
 static void ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe);
+#if (NGX_HTTP_SSL)
+static void ngx_http_health_check_ssl_init(ngx_event_t *ev);
+static void ngx_http_health_check_ssl_handshaked(ngx_connection_t *c);
+#endif
 static void ngx_http_health_check_send(ngx_event_t *wev);
 static void ngx_http_health_check_recv(ngx_event_t *rev);
 static void ngx_http_health_check_dummy(ngx_event_t *ev);
@@ -359,18 +363,178 @@ ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe)
     c->read->handler = ngx_http_health_check_recv;
     c->write->handler = ngx_http_health_check_send;
 
+#if (NGX_HTTP_SSL)
+    if (check->ssl) {
+        c->read->handler = ngx_http_health_check_ssl_init;
+        c->write->handler = ngx_http_health_check_ssl_init;
+    }
+#endif
+
     /* don't hold up a worker that is shutting down */
     c->read->cancelable = 1;
     c->write->cancelable = 1;
 
     probe->sent = check->request.data;
 
+    /* for https, the SSL handshake must be done within it too */
     ngx_add_timer(c->write, check->connect_timeout);
 
     if (rc == NGX_OK) {
-        ngx_http_health_check_send(c->write);
+        c->write->handler(c->write);
     }
 }
+
+
+#if (NGX_HTTP_SSL)
+
+/* Connected (or failed to): starts the SSL handshake. */
+
+static void
+ngx_http_health_check_ssl_init(ngx_event_t *ev)
+{
+    int                             err;
+    socklen_t                       len;
+    ngx_int_t                       rc;
+    ngx_uint_t                      failed;
+    ngx_connection_t               *c;
+    ngx_http_health_check_t        *check;
+    ngx_http_health_check_probe_t  *probe;
+
+    c = ev->data;
+    probe = c->data;
+    check = probe->check;
+
+    if (ev->timedout) {
+        ngx_http_health_check_finish(probe, (u_char *)
+                                     "timed out connecting");
+        return;
+    }
+
+    /* as ngx_http_upstream_test_connect() */
+
+#if (NGX_HAVE_KQUEUE)
+
+    if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
+        failed = (c->write->pending_eof || c->read->pending_eof);
+
+    } else
+#endif
+    {
+        err = 0;
+        len = sizeof(int);
+
+        if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len)
+            == -1)
+        {
+            err = ngx_socket_errno;
+        }
+
+        failed = (err != 0);
+    }
+
+    if (failed) {
+        ngx_http_health_check_finish(probe, (u_char *) "connect() failed");
+        return;
+    }
+
+    if (ngx_ssl_create_connection(check->ssl, c, NGX_SSL_CLIENT) != NGX_OK) {
+        ngx_http_health_check_abort(probe,
+                               (u_char *) "cannot create an SSL connection");
+        return;
+    }
+
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+
+    if (check->ssl_server_name
+        && SSL_set_tlsext_host_name(c->ssl->connection,
+                                    (char *) check->ssl_server_name)
+           == 0)
+    {
+        ngx_ssl_error(NGX_LOG_ERR, c->log, 0,
+                      "SSL_set_tlsext_host_name(\"%s\") failed",
+                      check->ssl_server_name);
+        ngx_http_health_check_abort(probe,
+                                    (u_char *) "cannot set the SSL server name");
+        return;
+    }
+
+#endif
+
+    rc = ngx_ssl_handshake(c);
+
+    if (rc == NGX_AGAIN) {
+        /* the connect timer is still set: it bounds the handshake */
+        c->ssl->handler = ngx_http_health_check_ssl_handshaked;
+        return;
+    }
+
+    ngx_http_health_check_ssl_handshaked(c);
+}
+
+
+/* The handshake is over, or failed: checks the certificate, then sends. */
+
+static void
+ngx_http_health_check_ssl_handshaked(ngx_connection_t *c)
+{
+    long                            rc;
+    u_char                         *p, *last;
+    ngx_http_health_check_t        *check;
+    ngx_http_health_check_probe_t  *probe;
+
+    probe = c->data;
+    check = probe->check;
+
+    if (!c->ssl->handshaked) {
+        ngx_http_health_check_finish(probe, c->write->timedout
+                                     ? (u_char *) "timed out in SSL handshake"
+                                     : (u_char *) "SSL handshake failed");
+        return;
+    }
+
+    if (check->ssl_verify) {
+        rc = SSL_get_verify_result(c->ssl->connection);
+
+        if (rc != X509_V_OK) {
+            p = ngx_pnalloc(probe->pool, NGX_MAX_ERROR_STR);
+            if (p == NULL) {
+                ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+                return;
+            }
+
+            last = ngx_snprintf(p, NGX_MAX_ERROR_STR - 1,
+                                "SSL certificate verify error: (%l:%s)",
+                                rc, X509_verify_cert_error_string(rc));
+            *last = '\0';
+
+            ngx_http_health_check_finish(probe, p);
+            return;
+        }
+
+        if (ngx_ssl_check_host(c, &check->ssl_name) != NGX_OK) {
+            p = ngx_pnalloc(probe->pool, NGX_MAX_ERROR_STR);
+            if (p == NULL) {
+                ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+                return;
+            }
+
+            last = ngx_snprintf(p, NGX_MAX_ERROR_STR - 1,
+                                "SSL certificate does not match \"%V\"",
+                                &check->ssl_name);
+            *last = '\0';
+
+            ngx_http_health_check_finish(probe, p);
+            return;
+        }
+    }
+
+    c->read->handler = ngx_http_health_check_recv;
+    c->write->handler = ngx_http_health_check_send;
+
+    ngx_http_health_check_send(c->write);
+}
+
+#endif
 
 
 static void
@@ -950,6 +1114,17 @@ ngx_http_health_check_close(ngx_http_health_check_probe_t *probe)
     check = probe->check;
 
     if (probe->pc.connection) {
+
+#if (NGX_HTTP_SSL)
+        if (probe->pc.connection->ssl) {
+            /* nothing more to say to the server, or to hear from it */
+            probe->pc.connection->ssl->no_wait_shutdown = 1;
+            probe->pc.connection->ssl->no_send_shutdown = 1;
+
+            (void) ngx_ssl_shutdown(probe->pc.connection);
+        }
+#endif
+
         ngx_close_connection(probe->pc.connection);
         probe->pc.connection = NULL;
     }

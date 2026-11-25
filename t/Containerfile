@@ -1,5 +1,6 @@
 # Test image: nginx built from source with this module, plus dnsmasq for the
-# "resolve" tests and socat for the raw-response tests. Build context: the repository root (see the Makefile).
+# "resolve" tests and socat for the raw-response tests, and certificates for
+# the https tests. Build context: the repository root (see the Makefile).
 
 ARG ALPINE_VERSION=3.24.4
 ARG NGINX_VERSION=1.30.6
@@ -8,7 +9,19 @@ FROM docker.io/library/alpine:${ALPINE_VERSION} AS builder
 ARG NGINX_VERSION
 
 RUN apk add --no-cache \
-      gcc git linux-headers make musl-dev openssl-dev pcre2-dev zlib-dev
+      gcc git linux-headers make musl-dev openssl openssl-dev pcre2-dev zlib-dev
+
+# test-ca signs the certificate of tls.test; other-ca signs nothing
+WORKDIR /certs
+RUN for ca in test-ca other-ca; do \
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+        -days 3650 -subj "/CN=$ca" -keyout "$ca.key" -out "$ca.crt" || exit 1; \
+    done \
+ && openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -subj /CN=tls.test -keyout tls.key -out tls.csr \
+ && printf 'subjectAltName=DNS:tls.test\n' > tls.ext \
+ && openssl x509 -req -in tls.csr -CA test-ca.crt -CAkey test-ca.key \
+      -CAcreateserial -days 3650 -extfile tls.ext -out tls.crt
 
 WORKDIR /build
 RUN git clone --depth 1 --branch "release-${NGINX_VERSION}" \
@@ -46,6 +59,8 @@ RUN apk add --no-cache dnsmasq libcrypto3 libssl3 pcre2 socat zlib \
 COPY --from=builder /out/usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /out/usr/lib/nginx/modules/ /usr/lib/nginx/modules/
 COPY --from=builder /out/etc/nginx/ /etc/nginx/
+COPY --from=builder /certs/test-ca.crt /certs/other-ca.crt /certs/tls.crt \
+     /certs/tls.key /etc/nginx/certs/
 COPY t/nginx.conf /etc/nginx/nginx.conf
 COPY t/entrypoint.sh t/raw.sh /
 STOPSIGNAL SIGQUIT

@@ -34,7 +34,9 @@
  * (peers->tries) in step, as nginx does for "down" servers. Servers marked
  * "down" in the configuration are never checked or brought up. Fails and
  * passes are fixed at 1, servers start healthy, and probes use the
- * location's proxy_connect/send/read timeouts and Host $proxy_host. At most
+ * location's proxy_connect/send/read timeouts and Host $proxy_host; with
+ * proxy_pass https://, also its SSL context and proxy_ssl_verify,
+ * proxy_ssl_server_name and proxy_ssl_name (no session reuse). At most
  * a quarter of worker_connections probes run at a time; a probe that cannot
  * run for a reason of worker 0's own (no free connection, no memory) leaves
  * the server's state as it was.
@@ -84,6 +86,10 @@ static ngx_http_health_check_upstream_t *ngx_http_health_check_get_upstream(
     ngx_conf_t *cf, ngx_http_health_check_main_conf_t *hmcf,
     ngx_http_upstream_srv_conf_t *uscf);
 static ngx_int_t ngx_http_health_check_postconf(ngx_conf_t *cf);
+#if (NGX_HTTP_SSL)
+static ngx_int_t ngx_http_health_check_ssl(ngx_conf_t *cf,
+    ngx_http_health_check_t *check, ngx_http_proxy_loc_conf_t *plcf);
+#endif
 static ngx_int_t ngx_http_health_check_init_process(ngx_cycle_t *cycle);
 
 
@@ -393,11 +399,18 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
             return NGX_ERROR;
         }
 
-#if (NGX_HTTP_SSL || NGX_COMPAT)
+#if (NGX_HTTP_SSL)
+        if (plcf->ssl
+            && ngx_http_health_check_ssl(cf, check, plcf) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+#elif (NGX_COMPAT)
         if (plcf->ssl) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
-                          "\"health_check\" over https is not supported by "
-                          "ngx_http_health_check_module in %V:%ui",
+                          "\"health_check\" over https needs "
+                          "ngx_http_health_check_module built with "
+                          "--with-http_ssl_module in %V:%ui",
                           &check->file, check->line);
             return NGX_ERROR;
         }
@@ -465,6 +478,103 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
     return NGX_OK;
 }
 
+
+#if (NGX_HTTP_SSL)
+
+/*
+ * proxy_pass https://: probes use the location's SSL context, so its
+ * protocols, ciphers, client certificate and trusted certificates, and
+ * proxy_ssl_verify, proxy_ssl_server_name and proxy_ssl_name, as requests
+ * do. The name defaults to the group's name, as $proxy_host does. A probe
+ * isn't a request, so a name or certificate given with variables has no
+ * value for it.
+ */
+
+static ngx_int_t
+ngx_http_health_check_ssl(ngx_conf_t *cf, ngx_http_health_check_t *check,
+    ngx_http_proxy_loc_conf_t *plcf)
+{
+    u_char                    *p, *last;
+    ngx_str_t                  name;
+    ngx_http_upstream_conf_t  *ucf;
+
+    ucf = &plcf->upstream;
+
+    if (ucf->ssl == NULL || ucf->ssl->ctx == NULL) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                      "no SSL context for \"health_check\" in %V:%ui",
+                      &check->file, check->line);
+        return NGX_ERROR;
+    }
+
+    if (ucf->ssl_name && ucf->ssl_name->lengths) {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                      "\"health_check\" cannot use \"proxy_ssl_name\" "
+                      "with variables in %V:%ui", &check->file, check->line);
+        return NGX_ERROR;
+    }
+
+    if (ucf->ssl_certificate
+        && ucf->ssl_certificate->value.len
+        && (ucf->ssl_certificate->lengths
+            || (ucf->ssl_certificate_key
+                && ucf->ssl_certificate_key->lengths)))
+    {
+        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                      "\"health_check\" cannot use \"proxy_ssl_certificate\" "
+                      "or \"proxy_ssl_certificate_key\" with variables "
+                      "in %V:%ui", &check->file, check->line);
+        return NGX_ERROR;
+    }
+
+    name = ucf->ssl_name ? ucf->ssl_name->value : ucf->upstream->host;
+
+    /* without a port, as ngx_http_upstream_ssl_name() does */
+
+    p = name.data;
+    last = name.data + name.len;
+
+    if (name.len && *p == '[') {
+        p = ngx_strlchr(p, last, ']');
+
+        if (p == NULL) {
+            p = name.data;
+        }
+    }
+
+    p = ngx_strlchr(p, last, ':');
+
+    if (p != NULL) {
+        name.len = p - name.data;
+    }
+
+    check->ssl = ucf->ssl;
+    check->ssl_name = name;
+    check->ssl_verify = ucf->ssl_verify;
+
+    /* as per RFC 6066, literal IPv4 and IPv6 addresses are not sent */
+
+    if (!ucf->ssl_server_name
+        || name.len == 0
+        || *name.data == '['
+        || ngx_inet_addr(name.data, name.len) != INADDR_NONE)
+    {
+        return NGX_OK;
+    }
+
+    p = ngx_pnalloc(cf->pool, name.len + 1);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
+
+    (void) ngx_cpystrn(p, name.data, name.len + 1);
+
+    check->ssl_server_name = p;
+
+    return NGX_OK;
+}
+
+#endif
 
 /* Checks run in worker 0 only. */
 
