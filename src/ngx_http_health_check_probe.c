@@ -1103,6 +1103,7 @@ again:
 static void
 ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
 {
+    u_char      reason[NGX_MAX_ERROR_STR];
     size_t      len;
     ngx_str_t   body;
     ngx_int_t   rc;
@@ -1185,9 +1186,9 @@ ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
     body.len = ngx_min(len, NGX_HTTP_HC_BODY_MAX);
 
     ngx_http_hc_finish(probe,
-        ngx_http_hc_match_response(probe->check->match, probe->pool,
-                                   probe->status, probe->headers,
-                                   &body));
+                       ngx_http_hc_match(probe->check->match, probe->status,
+                                         probe->headers, &body, reason,
+                                         sizeof(reason)));
 }
 
 

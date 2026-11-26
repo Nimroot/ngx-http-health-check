@@ -108,9 +108,8 @@ char *ngx_http_hc_match_block(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 ngx_http_hc_match_t *ngx_http_hc_match_find(ngx_http_hc_main_conf_t *hmcf,
     ngx_str_t *name);
-u_char *ngx_http_hc_match_response(ngx_http_hc_match_t *match,
-    ngx_pool_t *pool, ngx_uint_t status, ngx_array_t *headers,
-    ngx_str_t *body);
+u_char *ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_uint_t code,
+    ngx_array_t *headers, ngx_str_t *body, u_char *buf, size_t len);
 
 ngx_int_t ngx_http_hc_init_process(ngx_cycle_t *cycle);
 

@@ -38,8 +38,6 @@ static char *ngx_http_hc_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
     void *conf);
 static char *ngx_http_hc_test_op(ngx_conf_t *cf, ngx_http_hc_test_t *t,
     ngx_str_t *op, ngx_str_t *arg);
-static u_char *ngx_http_hc_run_test(ngx_http_hc_test_t *t, ngx_pool_t *pool,
-    ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body);
 static ngx_uint_t ngx_http_hc_passes(ngx_http_hc_test_t *t, ngx_str_t *s);
 
 
@@ -290,114 +288,94 @@ ngx_http_hc_match_find(ngx_http_hc_main_conf_t *hmcf, ngx_str_t *name)
 
 
 /*
- * NULL if the response passes every test of "match" (without a match block:
- * if its status is 2xx or 3xx), otherwise why it failed. "headers" holds
- * ngx_keyval_t; the reason is allocated from "pool".
+ * NULL if a complete response passes every test of "match" (without a
+ * match block: if its status is 2xx or 3xx); otherwise why not, in buf.
  */
 
 u_char *
-ngx_http_hc_match_response(ngx_http_hc_match_t *match, ngx_pool_t *pool,
-    ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body)
+ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_uint_t code,
+    ngx_array_t *headers, ngx_str_t *body, u_char *buf, size_t len)
 {
-    u_char              *reason;
-    ngx_uint_t           i;
-    ngx_http_hc_test_t  *t;
+    u_char               *last;
+    ngx_uint_t            i, j, pass;
+    ngx_keyval_t         *h;
+    ngx_http_hc_test_t   *t;
+    ngx_http_hc_range_t  *range;
 
     if (match == NULL) {
-        if (status >= 200 && status < 400) {
+        if (code >= 200 && code < 400) {
             return NULL;
         }
 
-        reason = ngx_pnalloc(pool, 64);
-        if (reason == NULL) {
-            return (u_char *) "bad status";
-        }
+        last = ngx_snprintf(buf, len - 1, "status %ui is not 2xx or 3xx",
+                            code);
+        *last = '\0';
 
-        ngx_sprintf(reason, "status %ui is not 2xx or 3xx%Z", status);
-
-        return reason;
+        return buf;
     }
 
     t = match->tests.elts;
+    h = headers->elts;
 
     for (i = 0; i < match->tests.nelts; i++) {
-        reason = ngx_http_hc_run_test(&t[i], pool, status, headers, body);
-        if (reason) {
-            return reason;
+
+        pass = 0;
+
+        switch (t[i].type) {
+
+        case NGX_HTTP_HC_STATUS:
+            range = t[i].ranges->elts;
+
+            for (j = 0; j < t[i].ranges->nelts && !pass; j++) {
+                pass = (code >= range[j].low && code <= range[j].high);
+            }
+
+            pass ^= t[i].negate;
+            break;
+
+        case NGX_HTTP_HC_HAS_HEADER:
+        case NGX_HTTP_HC_HEADER:
+
+            /* "header name != value": one with another value */
+
+            for (j = 0; j < headers->nelts && !pass; j++) {
+                pass = (h[j].key.len == t[i].name.len
+                        && ngx_strncasecmp(h[j].key.data, t[i].name.data,
+                                           t[i].name.len) == 0
+                        && (t[i].type == NGX_HTTP_HC_HAS_HEADER
+                            || ngx_http_hc_passes(&t[i], &h[j].value)));
+            }
+
+            if (t[i].type == NGX_HTTP_HC_HAS_HEADER) {
+                pass ^= t[i].negate;
+            }
+
+            break;
+
+        case NGX_HTTP_HC_BODY:
+            pass = ngx_http_hc_passes(&t[i], body);
+            break;
         }
+
+        if (pass) {
+            continue;
+        }
+
+        if (t[i].type == NGX_HTTP_HC_STATUS) {
+            last = ngx_snprintf(buf, len - 1, "status %ui fails \"%V\"",
+                                code, &t[i].text);
+
+        } else {
+            last = ngx_snprintf(buf, len - 1, "response fails \"%V\"",
+                                &t[i].text);
+        }
+
+        *last = '\0';
+
+        return buf;
     }
 
     return NULL;
-}
-
-
-/* NULL if the response passes the test, otherwise why it failed. */
-
-static u_char *
-ngx_http_hc_run_test(ngx_http_hc_test_t *t, ngx_pool_t *pool,
-    ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body)
-{
-    u_char               *reason;
-    ngx_uint_t            i, pass;
-    ngx_keyval_t         *h;
-    ngx_http_hc_range_t  *range;
-
-    pass = 0;
-
-    switch (t->type) {
-
-    case NGX_HTTP_HC_STATUS:
-        range = t->ranges->elts;
-
-        for (i = 0; i < t->ranges->nelts && !pass; i++) {
-            pass = (status >= range[i].low && status <= range[i].high);
-        }
-
-        pass ^= t->negate;
-        break;
-
-    case NGX_HTTP_HC_HAS_HEADER:
-    case NGX_HTTP_HC_HEADER:
-        h = headers->elts;
-
-        /* "header name != value": one with another value */
-
-        for (i = 0; i < headers->nelts && !pass; i++) {
-            pass = (h[i].key.len == t->name.len
-                    && ngx_strncasecmp(h[i].key.data, t->name.data,
-                                       t->name.len) == 0
-                    && (t->type == NGX_HTTP_HC_HAS_HEADER
-                        || ngx_http_hc_passes(t, &h[i].value)));
-        }
-
-        if (t->type == NGX_HTTP_HC_HAS_HEADER) {
-            pass ^= t->negate;
-        }
-
-        break;
-
-    case NGX_HTTP_HC_BODY:
-        pass = ngx_http_hc_passes(t, body);
-        break;
-    }
-
-    if (pass) {
-        return NULL;
-    }
-
-    reason = ngx_pnalloc(pool, t->text.len + 64);
-    if (reason == NULL) {
-        return (u_char *) "test failed";
-    }
-
-    if (t->type == NGX_HTTP_HC_STATUS) {
-        ngx_sprintf(reason, "status %ui fails \"%V\"%Z", status, &t->text);
-
-    } else {
-        ngx_sprintf(reason, "response fails \"%V\"%Z", &t->text);
-    }
-
-    return reason;
 }
 
 
