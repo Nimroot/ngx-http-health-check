@@ -62,8 +62,10 @@ static void ngx_http_hc_run(ngx_event_t *ev);
 static void ngx_http_hc_prune(ngx_http_hc_upstream_t *up, ngx_queue_t *list);
 static void ngx_http_hc_start(void);
 static void ngx_http_hc_connect(ngx_http_hc_probe_t *probe);
+static void ngx_http_hc_connected(ngx_event_t *ev);
 #if (NGX_HTTP_SSL)
-static void ngx_http_hc_ssl_init(ngx_event_t *ev);
+static void ngx_http_hc_ssl_handshake(ngx_http_hc_probe_t *p,
+    ngx_connection_t *c);
 static void ngx_http_hc_ssl_handshaked(ngx_connection_t *c);
 #endif
 static void ngx_http_hc_send(ngx_event_t *wev);
@@ -389,15 +391,8 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
     c = pc->connection;
     c->data = probe;
     c->pool = probe->pool;
-    c->read->handler = ngx_http_hc_recv;
-    c->write->handler = ngx_http_hc_send;
-
-#if (NGX_HTTP_SSL)
-    if (check->ssl) {
-        c->read->handler = ngx_http_hc_ssl_init;
-        c->write->handler = ngx_http_hc_ssl_init;
-    }
-#endif
+    c->read->handler = ngx_http_hc_connected;
+    c->write->handler = ngx_http_hc_connected;
 
     /* don't hold up a worker that is shutting down */
     c->read->cancelable = 1;
@@ -409,41 +404,34 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
     ngx_add_timer(c->write, check->conf->connect_timeout);
 
     if (rc == NGX_OK) {
-        c->write->handler(c->write);
+        ngx_http_hc_connected(c->write);
     }
 }
 
 
-#if (NGX_HTTP_SSL)
-
-/* Connected (or failed to): starts the SSL handshake. */
+/* Connected, or not: either event may tell first. */
 
 static void
-ngx_http_hc_ssl_init(ngx_event_t *ev)
+ngx_http_hc_connected(ngx_event_t *ev)
 {
     int                   err;
     socklen_t             len;
-    ngx_int_t             rc;
-    ngx_uint_t            failed;
     ngx_connection_t     *c;
-    ngx_http_hc_t        *check;
-    ngx_http_hc_probe_t  *probe;
+    ngx_http_hc_probe_t  *p;
 
     c = ev->data;
-    probe = c->data;
-    check = probe->check;
+    p = c->data;
 
     if (ev->timedout) {
-        ngx_http_hc_finish(probe, (u_char *) "timed out connecting");
+        ngx_http_hc_finish(p, (u_char *) "timed out connecting");
         return;
     }
 
     /* as ngx_http_upstream_test_connect() */
 
 #if (NGX_HAVE_KQUEUE)
-
     if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
-        failed = (c->write->pending_eof || c->read->pending_eof);
+        err = (c->write->pending_eof || c->read->pending_eof);
 
     } else
 #endif
@@ -457,39 +445,58 @@ ngx_http_hc_ssl_init(ngx_event_t *ev)
             err = ngx_socket_errno;
         }
 
-        failed = (err != 0);
+        if (err) {
+            (void) ngx_connection_error(c, err, "connect() failed");
+        }
     }
 
-    if (failed) {
-        ngx_http_hc_finish(probe, (u_char *) "connect() failed");
+    if (err) {
+        ngx_http_hc_finish(p, (u_char *) "connect() failed");
         return;
     }
 
-    if (ngx_ssl_create_connection(check->ssl, c, NGX_SSL_CLIENT) != NGX_OK) {
-        ngx_http_hc_abort(probe, (u_char *) "cannot create an SSL connection");
+    c->read->handler = ngx_http_hc_dummy;
+    c->write->handler = ngx_http_hc_send;
+
+#if (NGX_HTTP_SSL)
+    if (p->check->ssl) {
+        ngx_http_hc_ssl_handshake(p, c);
         return;
     }
-
-#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
-
-    if (check->ssl_server_name
-        && SSL_set_tlsext_host_name(c->ssl->connection,
-                                    (char *) check->ssl_server_name)
-           == 0)
-    {
-        ngx_ssl_error(NGX_LOG_ERR, c->log, 0,
-                      "SSL_set_tlsext_host_name(\"%s\") failed",
-                      check->ssl_server_name);
-        ngx_http_hc_abort(probe, (u_char *) "cannot set the SSL server name");
-        return;
-    }
-
 #endif
 
-    rc = ngx_ssl_handshake(c);
+    ngx_http_hc_send(c->write);
+}
 
-    if (rc == NGX_AGAIN) {
-        /* the connect timer is still set: it bounds the handshake */
+
+#if (NGX_HTTP_SSL)
+
+static void
+ngx_http_hc_ssl_handshake(ngx_http_hc_probe_t *p, ngx_connection_t *c)
+{
+    u_char  *name;
+
+    if (ngx_ssl_create_connection(p->check->ssl, c, NGX_SSL_CLIENT)
+        != NGX_OK)
+    {
+        ngx_http_hc_abort(p, (u_char *) "cannot create an SSL connection");
+        return;
+    }
+
+    name = p->check->ssl_server_name;
+
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+    if (name && SSL_set_tlsext_host_name(c->ssl->connection, (char *) name)
+                == 0)
+    {
+        ngx_ssl_error(NGX_LOG_ERR, c->log, 0,
+                      "SSL_set_tlsext_host_name(\"%s\") failed", name);
+        ngx_http_hc_abort(p, (u_char *) "cannot set the SSL server name");
+        return;
+    }
+#endif
+
+    if (ngx_ssl_handshake(c) == NGX_AGAIN) {
         c->ssl->handler = ngx_http_hc_ssl_handshaked;
         return;
     }
@@ -554,7 +561,7 @@ ngx_http_hc_ssl_handshaked(ngx_connection_t *c)
         }
     }
 
-    c->read->handler = ngx_http_hc_recv;
+    c->read->handler = ngx_http_hc_dummy;
     c->write->handler = ngx_http_hc_send;
 
     ngx_http_hc_send(c->write);
@@ -588,7 +595,7 @@ ngx_http_hc_send(ngx_event_t *wev)
         n = c->send(c, probe->sent, last - probe->sent);
 
         if (n == NGX_ERROR) {
-            ngx_http_hc_finish(probe, (u_char *) "connect() or send() failed");
+            ngx_http_hc_finish(probe, (u_char *) "send() failed");
             return;
         }
 
@@ -612,6 +619,7 @@ ngx_http_hc_send(ngx_event_t *wev)
     }
 
     wev->handler = ngx_http_hc_dummy;
+    c->read->handler = ngx_http_hc_recv;
 
     ngx_add_timer(c->read, check->conf->read_timeout);
 
@@ -696,13 +704,7 @@ ngx_http_hc_recv(ngx_event_t *rev)
         }
 
         if (n == NGX_ERROR) {
-            /*
-             * A failed non-blocking connect() can be reported on the read
-             * event before the write event has run: nothing was sent yet.
-             */
-            ngx_http_hc_finish(probe,
-                probe->sent == probe->check->request.data
-                ? (u_char *) "connect() failed" : (u_char *) "recv() failed");
+            ngx_http_hc_finish(probe, (u_char *) "recv() failed");
             return;
         }
 
