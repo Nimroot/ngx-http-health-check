@@ -96,7 +96,7 @@ ngx_module_t  ngx_http_health_check_module = {
 };
 
 
-/* health_check parameters that are recognized but not implemented. */
+/* health_check parameters that are recognized but not implemented */
 static ngx_str_t  ngx_http_hc_unsupported[] = {
     ngx_string("jitter="),
     ngx_string("fails="),
@@ -174,10 +174,7 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
             ms = ngx_parse_time(&s, 0);
             if (ms == NGX_ERROR || ms == 0) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "invalid \"interval\" value \"%V\"",
-                                   &value[i]);
-                return NGX_CONF_ERROR;
+                goto invalid;
             }
 
             hc->interval = (ngx_msec_t) ms;
@@ -188,17 +185,15 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             s.data = value[i].data + 4;
             s.len = value[i].len - 4;
 
+            /* it goes into the request line as it is */
+
             if (s.len == 0) {
                 goto invalid;
             }
 
-            /* the URI goes into the request line verbatim */
             for (p = s.data; p < s.data + s.len; p++) {
                 if (*p <= ' ' || *p == 0x7f) {
-                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                       "invalid \"uri\" value \"%V\"",
-                                       &value[i]);
-                    return NGX_CONF_ERROR;
+                    goto invalid;
                 }
             }
 
@@ -215,15 +210,12 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
         for (u = ngx_http_hc_unsupported; u->len; u++) {
-            if (value[i].len >= u->len
-                && ngx_strncmp(value[i].data, u->data, u->len) == 0
+            if (ngx_strncmp(value[i].data, u->data, u->len) == 0
                 && (u->data[u->len - 1] == '=' || value[i].len == u->len))
             {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "\"health_check\" parameter \"%V\" is not "
-                                   "supported by ngx_http_health_check_module "
-                                   "(supported: interval=, uri=, match=)",
-                                   &value[i]);
+                                   "\"%V\" is not supported by "
+                                   "ngx_http_health_check_module", &value[i]);
                 return NGX_CONF_ERROR;
             }
         }

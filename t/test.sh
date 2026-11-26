@@ -412,9 +412,9 @@ conf_test "unsupported parameter fails="            '"fails=3" is not supported'
     "$(srv 'location / { proxy_pass http://z; health_check fails=3; }')"
 conf_test "unsupported parameter mandatory"         '"mandatory" is not supported' \
     "$(srv 'location / { proxy_pass http://z; health_check mandatory; }')"
-conf_test "invalid interval"                        'invalid "interval" value' \
+conf_test "invalid interval"                        'invalid parameter "interval=soon"' \
     "$(srv 'location / { proxy_pass http://z; health_check interval=soon; }')"
-conf_test "invalid uri"                             'invalid "uri" value' \
+conf_test "uri with a space"                        'invalid parameter "uri=/a b"' \
     "$(srv 'location / { proxy_pass http://z; health_check "uri=/a b"; }')"
 conf_test "health_check outside location"           '"health_check" directive is not allowed here' \
     "$(srv 'health_check;')"
