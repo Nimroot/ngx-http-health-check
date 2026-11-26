@@ -37,7 +37,7 @@ struct ngx_http_hc_probe_s {
     /* ngx_keyval_t */
     ngx_array_t                        *headers;
     /* why ngx_http_hc_parse() rejected the response */
-    u_char                             *error;
+    const char                         *error;
 
     /* in the round's list, then in the waiting queue */
     ngx_queue_t                         queue;
@@ -76,8 +76,10 @@ static ngx_int_t ngx_http_hc_parse(ngx_http_hc_probe_t *probe,
 static ngx_int_t ngx_http_hc_dechunk(ngx_http_hc_probe_t *probe, u_char *out,
     size_t *len);
 static void ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe);
-static void ngx_http_hc_finish(ngx_http_hc_probe_t *probe, u_char *reason);
-static void ngx_http_hc_abort(ngx_http_hc_probe_t *probe, u_char *reason);
+static void ngx_http_hc_finish(ngx_http_hc_probe_t *probe,
+    const char *reason);
+static void ngx_http_hc_abort(ngx_http_hc_probe_t *probe,
+    const char *reason);
 static void ngx_http_hc_close(ngx_http_hc_probe_t *probe);
 static ngx_uint_t ngx_http_hc_admin_down(ngx_http_hc_upstream_t *up,
     ngx_http_upstream_rr_peer_t *peer);
@@ -379,12 +381,12 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
     /* NGX_DECLINED: connect() failed; NGX_ERROR: no socket or connection */
 
     if (rc == NGX_DECLINED) {
-        ngx_http_hc_finish(probe, (u_char *) "connect() failed");
+        ngx_http_hc_finish(probe, "connect() failed");
         return;
     }
 
     if (rc != NGX_OK && rc != NGX_AGAIN) {
-        ngx_http_hc_abort(probe, (u_char *) "cannot open a connection");
+        ngx_http_hc_abort(probe, "cannot open a connection");
         return;
     }
 
@@ -423,7 +425,7 @@ ngx_http_hc_connected(ngx_event_t *ev)
     p = c->data;
 
     if (ev->timedout) {
-        ngx_http_hc_finish(p, (u_char *) "timed out connecting");
+        ngx_http_hc_finish(p, "timed out connecting");
         return;
     }
 
@@ -451,7 +453,7 @@ ngx_http_hc_connected(ngx_event_t *ev)
     }
 
     if (err) {
-        ngx_http_hc_finish(p, (u_char *) "connect() failed");
+        ngx_http_hc_finish(p, "connect() failed");
         return;
     }
 
@@ -479,7 +481,7 @@ ngx_http_hc_ssl_handshake(ngx_http_hc_probe_t *p, ngx_connection_t *c)
     if (ngx_ssl_create_connection(p->check->ssl, c, NGX_SSL_CLIENT)
         != NGX_OK)
     {
-        ngx_http_hc_abort(p, (u_char *) "cannot create an SSL connection");
+        ngx_http_hc_abort(p, "cannot create an SSL connection");
         return;
     }
 
@@ -491,7 +493,7 @@ ngx_http_hc_ssl_handshake(ngx_http_hc_probe_t *p, ngx_connection_t *c)
     {
         ngx_ssl_error(NGX_LOG_ERR, c->log, 0,
                       "SSL_set_tlsext_host_name(\"%s\") failed", name);
-        ngx_http_hc_abort(p, (u_char *) "cannot set the SSL server name");
+        ngx_http_hc_abort(p, "cannot set the SSL server name");
         return;
     }
 #endif
@@ -511,52 +513,39 @@ static void
 ngx_http_hc_ssl_handshaked(ngx_connection_t *c)
 {
     long                  rc;
-    u_char               *p, *last;
-    ngx_http_hc_t        *check;
-    ngx_http_hc_probe_t  *probe;
+    u_char                reason[NGX_MAX_ERROR_STR], *last;
+    ngx_http_hc_t        *hc;
+    ngx_http_hc_probe_t  *p;
 
-    probe = c->data;
-    check = probe->check;
+    p = c->data;
+    hc = p->check;
 
     if (!c->ssl->handshaked) {
-        ngx_http_hc_finish(probe, c->write->timedout
-                           ? (u_char *) "timed out in SSL handshake"
-                           : (u_char *) "SSL handshake failed");
+        ngx_http_hc_finish(p, c->write->timedout ? "timed out in SSL handshake"
+                                                 : "SSL handshake failed");
         return;
     }
 
-    if (check->conf->ssl_verify) {
+    if (hc->conf->ssl_verify) {
         rc = SSL_get_verify_result(c->ssl->connection);
 
         if (rc != X509_V_OK) {
-            p = ngx_pnalloc(probe->pool, NGX_MAX_ERROR_STR);
-            if (p == NULL) {
-                ngx_http_hc_abort(probe, (u_char *) "out of memory");
-                return;
-            }
-
-            last = ngx_snprintf(p, NGX_MAX_ERROR_STR - 1,
+            last = ngx_snprintf(reason, sizeof(reason) - 1,
                                 "SSL certificate verify error: (%l:%s)",
                                 rc, X509_verify_cert_error_string(rc));
             *last = '\0';
 
-            ngx_http_hc_finish(probe, p);
+            ngx_http_hc_finish(p, (char *) reason);
             return;
         }
 
-        if (ngx_ssl_check_host(c, &check->ssl_name) != NGX_OK) {
-            p = ngx_pnalloc(probe->pool, NGX_MAX_ERROR_STR);
-            if (p == NULL) {
-                ngx_http_hc_abort(probe, (u_char *) "out of memory");
-                return;
-            }
-
-            last = ngx_snprintf(p, NGX_MAX_ERROR_STR - 1,
+        if (ngx_ssl_check_host(c, &hc->ssl_name) != NGX_OK) {
+            last = ngx_snprintf(reason, sizeof(reason) - 1,
                                 "SSL certificate does not match \"%V\"",
-                                &check->ssl_name);
+                                &hc->ssl_name);
             *last = '\0';
 
-            ngx_http_hc_finish(probe, p);
+            ngx_http_hc_finish(p, (char *) reason);
             return;
         }
     }
@@ -589,7 +578,7 @@ ngx_http_hc_send(ngx_event_t *wev)
     check = probe->check;
 
     if (wev->timedout) {
-        ngx_http_hc_finish(probe, (u_char *) "timed out sending the request");
+        ngx_http_hc_finish(probe, "timed out sending the request");
         return;
     }
 
@@ -599,7 +588,7 @@ ngx_http_hc_send(ngx_event_t *wev)
         n = c->send(c, probe->sent, last - probe->sent);
 
         if (n == NGX_ERROR) {
-            ngx_http_hc_finish(probe, (u_char *) "send() failed");
+            ngx_http_hc_finish(probe, "send() failed");
             return;
         }
 
@@ -607,7 +596,7 @@ ngx_http_hc_send(ngx_event_t *wev)
             ngx_add_timer(wev, check->conf->send_timeout);
 
             if (ngx_handle_write_event(wev, 0) != NGX_OK) {
-                ngx_http_hc_abort(probe, (u_char *) "cannot handle events");
+                ngx_http_hc_abort(probe, "cannot handle events");
             }
 
             return;
@@ -625,7 +614,7 @@ ngx_http_hc_send(ngx_event_t *wev)
     wev->handler = ngx_http_hc_dummy;
 
     if (ngx_handle_write_event(wev, 0) != NGX_OK) {
-        ngx_http_hc_abort(probe, (u_char *) "cannot handle events");
+        ngx_http_hc_abort(probe, "cannot handle events");
         return;
     }
 
@@ -651,15 +640,14 @@ ngx_http_hc_recv(ngx_event_t *rev)
     b = &probe->buf;
 
     if (rev->timedout) {
-        ngx_http_hc_finish(probe,
-                           (u_char *) "timed out reading the response");
+        ngx_http_hc_finish(probe, "timed out reading the response");
         return;
     }
 
     if (b->start == NULL) {
         b->start = ngx_palloc(probe->pool, NGX_HTTP_HC_BUF_INIT);
         if (b->start == NULL) {
-            ngx_http_hc_abort(probe, (u_char *) "out of memory");
+            ngx_http_hc_abort(probe, "out of memory");
             return;
         }
 
@@ -686,7 +674,7 @@ ngx_http_hc_recv(ngx_event_t *rev)
 
             p = ngx_palloc(probe->pool, size);
             if (p == NULL) {
-                ngx_http_hc_abort(probe, (u_char *) "out of memory");
+                ngx_http_hc_abort(probe, "out of memory");
                 return;
             }
 
@@ -702,14 +690,14 @@ ngx_http_hc_recv(ngx_event_t *rev)
             ngx_add_timer(rev, probe->check->conf->read_timeout);
 
             if (ngx_handle_read_event(rev, 0) != NGX_OK) {
-                ngx_http_hc_abort(probe, (u_char *) "cannot handle events");
+                ngx_http_hc_abort(probe, "cannot handle events");
             }
 
             return;
         }
 
         if (n == NGX_ERROR) {
-            ngx_http_hc_finish(probe, (u_char *) "recv() failed");
+            ngx_http_hc_finish(probe, "recv() failed");
             return;
         }
 
@@ -807,7 +795,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
     probe->content_length = -1;
     probe->bodyless = 0;
     probe->chunked = 0;
-    probe->error = (u_char *) "invalid response header";
+    probe->error = "invalid response header";
 
     if (store) {
         probe->headers = ngx_array_create(probe->pool, 8,
@@ -820,8 +808,8 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
     /* a TLS record (alert, handshake...): http:// to an https server */
 
     if (b->last > b->start && *b->start >= 0x14 && *b->start <= 0x17) {
-        probe->error = (u_char *) "TLS data instead of an HTTP response "
-                                  "(an https server?)";
+        probe->error = "TLS data instead of an HTTP response "
+                       "(an https server?)";
         return NGX_ERROR;
     }
 
@@ -851,7 +839,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
             if (end - line < 12 || ngx_strncmp(line, "HTTP/", 5) != 0
                 || line[8] != ' ')
             {
-                probe->error = (u_char *) "invalid status line";
+                probe->error = "invalid status line";
                 return NGX_ERROR;
             }
 
@@ -859,7 +847,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
                 || line[10] < '0' || line[10] > '9'
                 || line[11] < '0' || line[11] > '9')
             {
-                probe->error = (u_char *) "invalid status line";
+                probe->error = "invalid status line";
                 return NGX_ERROR;
             }
 
@@ -875,8 +863,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
 
         if (end == line) {
             if (probe->chunked && probe->content_length >= 0) {
-                probe->error = (u_char *)
-                               "both Content-Length and Transfer-Encoding";
+                probe->error = "both Content-Length and Transfer-Encoding";
                 return NGX_ERROR;
             }
 
@@ -917,12 +904,12 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
         {
             len = ngx_atoof(v, end - v);
             if (len == NGX_ERROR) {
-                probe->error = (u_char *) "invalid Content-Length";
+                probe->error = "invalid Content-Length";
                 return NGX_ERROR;
             }
 
             if (probe->content_length >= 0 && probe->content_length != len) {
-                probe->error = (u_char *) "conflicting Content-Length";
+                probe->error = "conflicting Content-Length";
                 return NGX_ERROR;
             }
 
@@ -942,7 +929,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
                                    sizeof("chunked") - 1)
                    != 0)
             {
-                probe->error = (u_char *) "unsupported Transfer-Encoding";
+                probe->error = "unsupported Transfer-Encoding";
                 return NGX_ERROR;
             }
 
@@ -964,7 +951,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
 
 too_large:
 
-    probe->error = (u_char *) "response header too large";
+    probe->error = "response header too large";
     return NGX_ERROR;
 }
 
@@ -992,7 +979,7 @@ ngx_http_hc_dechunk(ngx_http_hc_probe_t *probe, u_char *out, size_t *len)
     last = b->last;
     total = 0;
 
-    probe->error = (u_char *) "invalid chunked body";
+    probe->error = "invalid chunked body";
 
     for ( ;; ) {
 
@@ -1118,16 +1105,15 @@ ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
     rc = ngx_http_hc_parse(probe, 1);
 
     if (rc == NGX_ABORT) {
-        ngx_http_hc_abort(probe, (u_char *) "out of memory");
+        ngx_http_hc_abort(probe, "out of memory");
         return;
     }
 
     if (rc == NGX_AGAIN) {
         ngx_http_hc_finish(probe,
                            probe->buf.last == probe->buf.start
-                           ? (u_char *) "connection closed "
-                                        "without a response"
-                           : (u_char *) "incomplete response header");
+                           ? "connection closed without a response"
+                           : "incomplete response header");
         return;
     }
 
@@ -1147,7 +1133,7 @@ ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
         body.data = ngx_pnalloc(probe->pool,
                                 ngx_min(len, NGX_HTTP_HC_BODY_MAX));
         if (body.data == NULL) {
-            ngx_http_hc_abort(probe, (u_char *) "out of memory");
+            ngx_http_hc_abort(probe, "out of memory");
             return;
         }
 
@@ -1168,8 +1154,8 @@ ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
             && probe->buf.last - probe->buf.start
                < NGX_HTTP_HC_BUF_MAX)
         {
-            ngx_http_hc_finish(probe, (u_char *)
-                  "connection closed before the response body was complete");
+            ngx_http_hc_finish(probe, "connection closed before the response "
+                                      "body was complete");
             return;
         }
 
@@ -1184,8 +1170,8 @@ ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
         if ((off_t) len < ngx_min(probe->content_length,
                                   NGX_HTTP_HC_BODY_MAX))
         {
-            ngx_http_hc_finish(probe, (u_char *)
-                  "connection closed before the response body was complete");
+            ngx_http_hc_finish(probe, "connection closed before the response "
+                                      "body was complete");
             return;
         }
     }
@@ -1193,16 +1179,17 @@ ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
     body.len = ngx_min(len, NGX_HTTP_HC_BODY_MAX);
 
     ngx_http_hc_finish(probe,
-                       ngx_http_hc_match(probe->check->match, probe->status,
-                                         probe->headers, &body, reason,
-                                         sizeof(reason)));
+                       (char *) ngx_http_hc_match(probe->check->match,
+                                                  probe->status,
+                                                  probe->headers, &body,
+                                                  reason, sizeof(reason)));
 }
 
 
 /* Records the result (reason == NULL: passed) and frees the probe. */
 
 static void
-ngx_http_hc_finish(ngx_http_hc_probe_t *probe, u_char *reason)
+ngx_http_hc_finish(ngx_http_hc_probe_t *probe, const char *reason)
 {
     uint64_t                       bit;
     ngx_uint_t                     i, was, now;
@@ -1316,7 +1303,7 @@ done:
  */
 
 static void
-ngx_http_hc_abort(ngx_http_hc_probe_t *probe, u_char *reason)
+ngx_http_hc_abort(ngx_http_hc_probe_t *probe, const char *reason)
 {
     ngx_http_hc_t  *check;
 
