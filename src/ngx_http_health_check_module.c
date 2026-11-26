@@ -31,14 +31,9 @@
 #include <ngx_http_proxy_module.h>
 
 
-#define NGX_HTTP_HC_MAX_CHECKS  64    /* per group: failing bits */
-
-
 static void *ngx_http_hc_create_main_conf(ngx_conf_t *cf);
 static char *ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
-static ngx_http_hc_upstream_t *ngx_http_hc_get_upstream(ngx_conf_t *cf,
-    ngx_http_hc_main_conf_t *hmcf, ngx_http_upstream_srv_conf_t *uscf);
 static ngx_int_t ngx_http_hc_postconf(ngx_conf_t *cf);
 #if (NGX_HTTP_SSL)
 static ngx_int_t ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *hc);
@@ -126,9 +121,6 @@ ngx_http_hc_create_main_conf(ngx_conf_t *cf)
                        sizeof(ngx_http_hc_match_t))
         != NGX_OK
         || ngx_array_init(&hmcf->checks, cf->pool, 4, sizeof(ngx_http_hc_t))
-           != NGX_OK
-        || ngx_array_init(&hmcf->upstreams, cf->pool, 4,
-                          sizeof(ngx_http_hc_upstream_t *))
            != NGX_OK)
     {
         return NULL;
@@ -233,64 +225,6 @@ invalid:
 }
 
 
-static ngx_http_hc_upstream_t *
-ngx_http_hc_get_upstream(ngx_conf_t *cf, ngx_http_hc_main_conf_t *hmcf,
-    ngx_http_upstream_srv_conf_t *uscf)
-{
-    ngx_uint_t                   i;
-    ngx_http_upstream_server_t  *server, **sp;
-    ngx_http_hc_upstream_t      *up, **upp;
-
-    upp = hmcf->upstreams.elts;
-    for (i = 0; i < hmcf->upstreams.nelts; i++) {
-        if (upp[i]->uscf == uscf) {
-            return upp[i];
-        }
-    }
-
-    up = ngx_pcalloc(cf->pool, sizeof(ngx_http_hc_upstream_t));
-    if (up == NULL) {
-        return NULL;
-    }
-
-    up->uscf = uscf;
-
-    if (ngx_array_init(&up->down, cf->pool, 2,
-                       sizeof(ngx_http_upstream_server_t *))
-        != NGX_OK)
-    {
-        return NULL;
-    }
-
-    /* servers marked "down" in the configuration stay down */
-
-    if (uscf->servers) {
-        server = uscf->servers->elts;
-        for (i = 0; i < uscf->servers->nelts; i++) {
-            if (!server[i].down || server[i].host.len) {
-                continue;
-            }
-
-            sp = ngx_array_push(&up->down);
-            if (sp == NULL) {
-                return NULL;
-            }
-
-            *sp = &server[i];
-        }
-    }
-
-    upp = ngx_array_push(&hmcf->upstreams);
-    if (upp == NULL) {
-        return NULL;
-    }
-
-    *upp = up;
-
-    return up;
-}
-
-
 /*
  * Once the http block is parsed and merged: ties each health_check to its
  * location's group, proxy settings and match block, and builds its request.
@@ -301,9 +235,8 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
 {
     u_char                     *p;
     size_t                      len;
-    ngx_uint_t                  i;
+    ngx_uint_t                  i, j, n;
     ngx_http_hc_t              *hc;
-    ngx_http_hc_upstream_t     *up;
     ngx_http_hc_main_conf_t    *hmcf;
     ngx_http_proxy_loc_conf_t  *plcf;
 
@@ -346,12 +279,13 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
             }
         }
 
-        up = ngx_http_hc_get_upstream(cf, hmcf, hc[i].uscf);
-        if (up == NULL) {
-            return NGX_ERROR;
+        /* the next bit of the group's servers not taken by another check */
+
+        for (j = 0, n = 0; j < i; j++) {
+            n += (hc[j].uscf == hc[i].uscf);
         }
 
-        if (up->nchecks == NGX_HTTP_HC_MAX_CHECKS) {
+        if (n == NGX_HTTP_HC_MAX) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "too many health checks for upstream \"%V\" "
                           "in %V:%ui", &hc[i].uscf->host,
@@ -359,8 +293,7 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
             return NGX_ERROR;
         }
 
-        hc[i].upstream = up;
-        hc[i].index = up->nchecks++;
+        hc[i].bit = (ngx_uint_t) 1 << (NGX_HTTP_HC_SHIFT + n);
 
         /*
          * Host is $proxy_host. Probes don't speak HTTP/2: with

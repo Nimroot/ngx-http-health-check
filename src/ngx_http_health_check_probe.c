@@ -43,7 +43,6 @@ static ngx_uint_t   ngx_http_hc_starting;
 
 
 static void ngx_http_hc_run(ngx_event_t *ev);
-static void ngx_http_hc_prune(ngx_http_hc_upstream_t *up, ngx_queue_t *list);
 static void ngx_http_hc_start(void);
 static void ngx_http_hc_connect(ngx_http_hc_probe_t *probe);
 static void ngx_http_hc_connected(ngx_event_t *ev);
@@ -60,8 +59,6 @@ static void ngx_http_hc_finish(ngx_http_hc_probe_t *probe,
 static void ngx_http_hc_abort(ngx_http_hc_probe_t *probe,
     const char *reason);
 static void ngx_http_hc_close(ngx_http_hc_probe_t *probe);
-static ngx_uint_t ngx_http_hc_admin_down(ngx_http_hc_upstream_t *up,
-    ngx_http_upstream_rr_peer_t *peer);
 
 
 /* Checks run in worker 0 only. */
@@ -71,7 +68,6 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
 {
     ngx_uint_t                i;
     ngx_http_hc_t            *hc;
-    ngx_http_hc_upstream_t  **ups;
     ngx_http_hc_main_conf_t  *hmcf;
 
     if ((ngx_process != NGX_PROCESS_WORKER && ngx_process != NGX_PROCESS_SINGLE)
@@ -91,15 +87,6 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
     /* the rest is left to client connections */
     ngx_http_hc_max_active = ngx_max(cycle->connection_n / 4, 1);
 
-    ups = hmcf->upstreams.elts;
-    for (i = 0; i < hmcf->upstreams.nelts; i++) {
-        ups[i]->peers = ngx_array_create(cycle->pool, 4,
-                                         sizeof(ngx_http_hc_peer_t));
-        if (ups[i]->peers == NULL) {
-            return NGX_ERROR;
-        }
-    }
-
     hc = hmcf->checks.elts;
 
     for (i = 0; i < hmcf->checks.nelts; i++) {
@@ -115,102 +102,44 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
 }
 
 
-/*
- * Whether a server is down by configuration ("down" on its server line)
- * rather than by its health.
- *
- * A server added by "resolve" is a copy of its server line's template, whose
- * state nobody but the configuration changes; its name can't identify the
- * server line, as for an SRV record it is the record's target. Any other
- * server comes from a server line without "resolve", identified by its name
- * and one of its addresses.
- */
-
-static ngx_uint_t
-ngx_http_hc_admin_down(ngx_http_hc_upstream_t *up,
-    ngx_http_upstream_rr_peer_t *peer)
-{
-    ngx_uint_t                    i, j;
-    ngx_http_upstream_server_t  **server;
-
-    if (!peer->down) {
-        return 0;
-    }
-
-    if (peer->host) {
-        return peer->host->peer && peer->host->peer->down;
-    }
-
-    server = up->down.elts;
-    for (i = 0; i < up->down.nelts; i++) {
-
-        if (server[i]->name.len != peer->server.len
-            || ngx_strncmp(server[i]->name.data, peer->server.data,
-                           peer->server.len)
-               != 0)
-        {
-            continue;
-        }
-
-        for (j = 0; j < server[i]->naddrs; j++) {
-            if (ngx_cmp_sockaddr(server[i]->addrs[j].sockaddr,
-                                 server[i]->addrs[j].socklen,
-                                 peer->sockaddr, peer->socklen, 1)
-                == NGX_OK)
-            {
-                return 1;
-            }
-        }
-    }
-
-    return 0;
-}
-
-
 /* Timer: probe every server of the group, primary and backup. */
 
 static void
 ngx_http_hc_run(ngx_event_t *ev)
 {
-    ngx_uint_t                     complete;
     ngx_pool_t                    *pool;
     ngx_queue_t                    list;
     ngx_http_upstream_rr_peer_t   *peer;
     ngx_http_upstream_rr_peers_t  *peers;
     ngx_http_hc_t                 *check;
     ngx_http_hc_probe_t           *probe;
-    ngx_http_hc_upstream_t        *up;
 
     check = ev->data;
-    up = check->upstream;
 
     if (ngx_exiting || ngx_quit || ngx_terminate) {
         return;
     }
 
     ngx_queue_init(&list);
-    complete = 1;
 
-    for (peers = up->uscf->peer.data; peers; peers = peers->next) {
+    for (peers = check->uscf->peer.data; peers; peers = peers->next) {
 
         ngx_http_upstream_rr_peers_rlock(peers);
 
         for (peer = peers->peer; peer; peer = peer->next) {
 
-            if (ngx_http_hc_admin_down(up, peer)) {
+            if (peer->down & NGX_HTTP_HC_CONF_DOWN) {
                 continue;
             }
 
             pool = ngx_create_pool(1024, ev->log);
             if (pool == NULL) {
-                complete = 0;
                 continue;
             }
 
             probe = ngx_pcalloc(pool, sizeof(ngx_http_hc_probe_t));
             if (probe == NULL) {
                 ngx_destroy_pool(pool);
-                complete = 0;
                 continue;
             }
 
@@ -223,7 +152,6 @@ ngx_http_hc_run(ngx_event_t *ev)
 
             if (probe->sockaddr == NULL || probe->name.data == NULL) {
                 ngx_destroy_pool(pool);
-                complete = 0;
                 continue;
             }
 
@@ -237,15 +165,6 @@ ngx_http_hc_run(ngx_event_t *ev)
         ngx_http_upstream_rr_peers_unlock(peers);
     }
 
-    /*
-     * A server left out of an incomplete list may still be in the group:
-     * its state is kept until a round lists every server.
-     */
-
-    if (complete) {
-        ngx_http_hc_prune(up, &list);
-    }
-
     if (ngx_queue_empty(&list)) {
         ngx_add_timer(ev, check->interval);
         return;
@@ -256,49 +175,6 @@ ngx_http_hc_run(ngx_event_t *ev)
     ngx_queue_add(&ngx_http_hc_waiting, &list);
 
     ngx_http_hc_start();
-}
-
-
-/*
- * Forgets the state of addresses that are no longer in the group, such as
- * servers removed by "resolve". Otherwise the list would only ever grow.
- */
-
-static void
-ngx_http_hc_prune(ngx_http_hc_upstream_t *up, ngx_queue_t *list)
-{
-    ngx_uint_t            i;
-    ngx_queue_t          *q;
-    ngx_http_hc_peer_t   *st;
-    ngx_http_hc_probe_t  *probe;
-
-    st = up->peers->elts;
-    i = 0;
-
-    while (i < up->peers->nelts) {
-
-        for (q = ngx_queue_head(list);
-             q != ngx_queue_sentinel(list);
-             q = ngx_queue_next(q))
-        {
-            probe = ngx_queue_data(q, ngx_http_hc_probe_t, queue);
-
-            if (ngx_cmp_sockaddr(st[i].sockaddr, st[i].socklen,
-                                 probe->sockaddr, probe->socklen, 1)
-                == NGX_OK)
-            {
-                break;
-            }
-        }
-
-        if (q != ngx_queue_sentinel(list)) {
-            i++;
-            continue;
-        }
-
-        ngx_free(st[i].sockaddr);
-        st[i] = st[--up->peers->nelts];
-    }
 }
 
 
@@ -666,106 +542,73 @@ ngx_http_hc_dummy(ngx_event_t *ev)
 static void
 ngx_http_hc_finish(ngx_http_hc_probe_t *probe, const char *reason)
 {
-    uint64_t                       bit;
-    ngx_uint_t                     i, was, now;
+    ngx_uint_t                     was, now, prev, found;
+    ngx_http_hc_t                 *hc;
     ngx_http_upstream_rr_peer_t   *peer;
     ngx_http_upstream_rr_peers_t  *peers;
-    ngx_http_hc_t                 *check;
-    ngx_http_hc_peer_t            *st;
-    ngx_http_hc_upstream_t        *up;
 
-    check = probe->check;
-    up = check->upstream;
-    bit = (uint64_t) 1 << check->index;
+    hc = probe->check;
+    found = 0;
+    was = 0;
+    now = 0;
 
-    st = up->peers->elts;
-    for (i = 0; i < up->peers->nelts; i++) {
-        if (ngx_cmp_sockaddr(st[i].sockaddr, st[i].socklen,
-                             probe->sockaddr, probe->socklen, 1)
-            == NGX_OK)
-        {
-            break;
-        }
-    }
-
-    if (i == up->peers->nelts) {
-        st = ngx_array_push(up->peers);
-        if (st == NULL) {
-            goto done;
-        }
-
-        st->sockaddr = ngx_alloc(probe->socklen, ngx_cycle->log);
-        if (st->sockaddr == NULL) {
-            up->peers->nelts--;
-            goto done;
-        }
-
-        ngx_memcpy(st->sockaddr, probe->sockaddr, probe->socklen);
-        st->socklen = probe->socklen;
-        st->failing = 0;
-
-    } else {
-        st = &st[i];
-    }
-
-    was = (st->failing != 0);
-
-    if (reason) {
-        st->failing |= bit;
-
-    } else {
-        st->failing &= ~bit;
-    }
-
-    now = (st->failing != 0);
-
-    for (peers = up->uscf->peer.data; peers; peers = peers->next) {
+    for (peers = hc->uscf->peer.data; peers; peers = peers->next) {
 
         ngx_http_upstream_rr_peers_wlock(peers);
 
         for (peer = peers->peer; peer; peer = peer->next) {
+
             if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen,
                                  probe->sockaddr, probe->socklen, 1)
                 != NGX_OK
-                || peer->down == now
-                || ngx_http_hc_admin_down(up, peer))
+                || (peer->down & NGX_HTTP_HC_CONF_DOWN))
             {
                 continue;
             }
 
-            /*
-             * peers->tries counts the servers that aren't down. The zone
-             * module adjusts it by the same rule when "resolve" adds or
-             * removes a server, so it has to stay exact.
-             */
+            prev = peer->down;
+            peer->down = reason ? (prev | hc->bit) : (prev & ~hc->bit);
 
-            peer->down = now;
+            /* the servers that aren't down, as nginx counts them */
 
-            if (now) {
-                peers->tries--;
-
-            } else {
+            if (prev && !peer->down) {
                 peers->tries++;
+
+            } else if (!prev && peer->down) {
+                peers->tries--;
+            }
+
+            if (!found) {
+                was = prev;
+                now = peer->down;
+                found = 1;
             }
         }
 
         ngx_http_upstream_rr_peers_unlock(peers);
     }
 
-    if (now && !was) {
-        ngx_log_error(NGX_LOG_WARN, check->timer.log, 0,
+    if (!((was ^ now) & hc->bit)) {
+        /* no change */
+
+    } else if (now & hc->bit) {
+        ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
                       "peer %V in upstream \"%V\" is unhealthy: %s "
                       "(health_check in %V:%ui)",
-                      &probe->name, &up->uscf->host, reason,
-                      &check->file, check->line);
+                      &probe->name, &hc->uscf->host, reason,
+                      &hc->file, hc->line);
 
-    } else if (was && !now) {
-        ngx_log_error(NGX_LOG_NOTICE, check->timer.log, 0,
+    } else if (now & NGX_HTTP_HC_MASK) {
+        ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
+                      "peer %V in upstream \"%V\" passes health_check "
+                      "in %V:%ui, but fails another",
+                      &probe->name, &hc->uscf->host, &hc->file, hc->line);
+
+    } else {
+        ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
                       "peer %V in upstream \"%V\" is healthy",
-                      &probe->name, &up->uscf->host);
+                      &probe->name, &hc->uscf->host);
     }
-
-done:
 
     ngx_http_hc_close(probe);
 }
@@ -787,7 +630,7 @@ ngx_http_hc_abort(ngx_http_hc_probe_t *probe, const char *reason)
     ngx_log_error(NGX_LOG_ERR, check->timer.log, 0,
                   "peer %V in upstream \"%V\" not checked, state unchanged: "
                   "%s (health_check in %V:%ui)",
-                  &probe->name, &check->upstream->uscf->host, reason,
+                  &probe->name, &check->uscf->host, reason,
                   &check->file, check->line);
 
     ngx_http_hc_close(probe);

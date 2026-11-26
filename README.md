@@ -81,7 +81,8 @@ The group must have a `zone`.
 
 Without `match`, a check passes if the server answers with a 2xx or 3xx
 status. Several `health_check`s may check the same group, from different
-locations: a server is healthy only while all of them pass.
+locations (up to 48 per group, 16 on 32-bit systems): a server is healthy
+only while it passes all of them.
 
 ### match
 
@@ -113,6 +114,20 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 
 - Because of the `zone`, the group's servers live in shared memory, seen by
   every worker. Worker 0 runs all checks.
+- The result of a check is kept in the server's `down` field, in shared
+  memory, which every load-balancing method (round robin, `hash`, `ip_hash`,
+  `least_conn`, `random`, `sticky`) already looks at: each `health_check` of
+  the group sets or clears a bit of its own there, alongside nginx's own
+  values for `down` and `drain` on the server line. The module also keeps
+  the group's count of usable servers in step, as nginx does for servers
+  marked `down` in the configuration, so `proxy_next_upstream` makes one
+  attempt per healthy server.
+- Since the state is in shared memory, a new worker 0 (after a crash, for
+  instance) carries on from it. A reload starts a new zone: all servers
+  start healthy then, as do servers added by `resolve`.
+- Servers marked `down` in the configuration are never checked or brought
+  up. That includes servers added by `resolve`, also from SRV records
+  (`service=`).
 - A check opens a new connection to each server and sends `GET <uri>` with
   the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
   `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is
@@ -128,15 +143,6 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   `proxy_ssl_name`, which defaults to the group name. A failed handshake or
   certificate check fails the check, with the reason in the log. Each check
   does a full handshake (no session reuse).
-- The result sets the server's `down` flag in shared memory. Every
-  load-balancing method (round robin, `hash`, `ip_hash`, `least_conn`,
-  `random`) already skips down servers. The module also keeps the group's
-  count of usable servers in step, as nginx does for servers marked `down` in
-  the configuration, so `proxy_next_upstream` makes one attempt per healthy
-  server.
-- Servers marked `down` in the configuration are never checked or brought up.
-  That includes servers added by `resolve`, also from SRV records
-  (`service=`), whose names are those of the records' targets.
 - The response is read with nginx's own parsers, by the rules of its proxy:
   - the header must fit in `proxy_buffer_size`;
   - a response with status 1xx, 204 or 304 ends with its header; any other
@@ -150,12 +156,11 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   wait for their turn. A probe that worker 0 cannot carry out for a reason
   of its own (no free connection, out of memory) leaves the server's state
   as it was and logs an `error`.
-- Servers start healthy. That includes servers added by `resolve`, and
-  everything after a reload or a restart of worker 0.
-- A change of state is logged: `warn` with the reason, `notice` when the
-  server is healthy again:
+- A change of state is logged: `warn` with the reason when a check fails,
+  `notice` when it passes again:
 
       peer 10.0.0.2:8080 in upstream "backend" is unhealthy: status 503 fails "status 200" (health_check in /etc/nginx/nginx.conf:17)
+      peer 10.0.0.2:8080 in upstream "backend" passes health_check in /etc/nginx/nginx.conf:23, but fails another
       peer 10.0.0.2:8080 in upstream "backend" is healthy
 
 ## Differences from NGINX Plus
@@ -187,7 +192,8 @@ not from testing against NGINX Plus.
   page size. The 64k used in many examples is too small on systems with 16k
   pages (some arm64 systems); 256k works there.
 - **Compatibility:** the module reads and writes nginx's internal upstream
-  structures, which can change between nginx versions. Run the tests before
+  structures, which can change between nginx versions, and expects no other
+  module to write a server's `down` field at run time. Run the tests before
   upgrading.
 
 ## Source layout
@@ -215,6 +221,7 @@ where requests go:
   configuration are left alone; with no healthy server, requests get 502;
 - `proxy_next_upstream` counts only healthy servers;
 - with two checks of one group, a server is used only while it passes both;
+  restarting the workers keeps the state, with no new warning;
 - with `resolve`, servers added by DNS are checked, and removing an unhealthy
   server leaves the count of usable servers correct (dnsmasq in the container
   serves the changing answers); an SRV server marked `down` gets neither

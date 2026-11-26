@@ -92,6 +92,13 @@ logged() {
     bad "$1" "not in log: $2"
 }
 
+# not_logged NAME TEXT: TEXT doesn't appear in the log since $since
+not_logged() {
+    sleep 2
+    "$ENGINE" logs --since "$since" "$C" 2>&1 | grep -F -- "$2" >/dev/null \
+        && bad "$1" "in log: $2" || ok "$1" "not logged"
+}
+
 # extra_nginx DIR: starts a second nginx in the container, with its
 # config, pid and log in DIR and the http block read from stdin
 extra_nginx() {
@@ -172,14 +179,25 @@ expect "match: both servers"                   /match/     9101,9102
 
 # --- two checks of one group ---------------------------------------------------
 # hc_two is checked on /health and on /ready: a server is used only while
-# it passes both.
+# it passes both. Its state lives in shared memory, so a new worker 0
+# starts from it.
 
 echo "two checks: 9101 fails both"
 set_state "touch /tmp/hc/9101.fail /tmp/hc/9101.unready"
 expect "two: 9101 taken out"                   /two/ 9102
-cx "rm /tmp/hc/9101.fail"
-sleep 2
+since=$(date +%s); cx "rm /tmp/hc/9101.fail"
+logged "two: notice for the check that passes" \
+       'peer 127.0.0.1:9101 in upstream "hc_two" passes health_check in /etc/nginx/nginx.conf:'
 now    "two: 9101 still out, fails /ready"     /two/ 9102
+
+echo "two checks: workers restart while 9101 fails /ready"
+since=$(date +%s); cx "pkill -f '[n]ginx: worker process'"
+logged "restart: new workers started"          'start worker process'
+now    "restart: 9101 stays out"               /two/ 9102
+sleep 1
+now    "restart: 9101 still out"               /two/ 9102
+not_logged "restart: state kept, no new warning" \
+       'peer 127.0.0.1:9101 in upstream "hc_two" is unhealthy'
 
 echo "two checks: 9101 passes both"
 since=$(date +%s); set_state
@@ -398,12 +416,17 @@ EOF
     fi
 }
 srv() { echo "server { listen 127.0.0.1:18999; $1 }"; }
+locs() { local i; for ((i = 0; i < $1; i++)); do echo "location /$i { proxy_pass http://z; health_check; }"; done; }
 
 echo "configuration"
 conf_test "all three parameters"                    ok \
     "$(srv 'location / { proxy_pass http://z; health_check interval=10s uri=/hc match=m; }')"
 conf_test "bare health_check"                       ok \
     "$(srv 'location / { proxy_pass http://z; health_check; }')"
+conf_test "48 checks of one group"                  ok \
+    "$(srv "$(locs 48)")"
+conf_test "49 checks of one group"                  'too many health checks for upstream "z"' \
+    "$(srv "$(locs 49)")"
 conf_test "upstream without zone"                   'must reside in shared memory' \
     "$(srv 'location / { proxy_pass http://nz; health_check; }')"
 conf_test "unknown match"                           'match "nope" not found' \

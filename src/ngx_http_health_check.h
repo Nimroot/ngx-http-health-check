@@ -33,6 +33,18 @@
 #endif
 
 
+/*
+ * A server's health is kept where every load-balancing method looks: its
+ * "down" field, in the group's zone. Each health_check of the group owns
+ * one bit there, above the values nginx uses itself ("down" on the server
+ * line is 1, "drain" is 8). A server is used while "down" is 0.
+ */
+
+#define NGX_HTTP_HC_CONF_DOWN   1
+#define NGX_HTTP_HC_SHIFT       16
+#define NGX_HTTP_HC_MASK        ((ngx_uint_t) -1 << NGX_HTTP_HC_SHIFT)
+#define NGX_HTTP_HC_MAX         (sizeof(ngx_uint_t) * 8 - NGX_HTTP_HC_SHIFT)
+
 #define NGX_HTTP_HC_BODY_MAX    (256 * 1024)     /* body bytes examined */
 
 
@@ -43,37 +55,13 @@ typedef struct {
 } ngx_http_hc_match_t;
 
 
-/* Health of one server address, kept by worker 0. */
-typedef struct {
-    struct sockaddr                    *sockaddr;
-    socklen_t                           socklen;
-    uint64_t                            failing;   /* one bit per check */
-} ngx_http_hc_peer_t;
-
-
-/* An upstream group checked by one or more health_check directives. */
-typedef struct {
-    ngx_http_upstream_srv_conf_t       *uscf;
-    /*
-     * server lines without "resolve" marked "down" in the configuration
-     * (ngx_http_upstream_server_t *); servers added by "resolve" take their
-     * state from their template, see ngx_http_hc_admin_down()
-     */
-    ngx_array_t                         down;
-    /* ngx_http_hc_peer_t */
-    ngx_array_t                        *peers;
-    ngx_uint_t                          nchecks;
-} ngx_http_hc_upstream_t;
-
-
 /* One health_check directive. */
 
 typedef struct {
     ngx_http_upstream_srv_conf_t   *uscf;
     ngx_http_upstream_conf_t       *conf;        /* the location's proxy_* */
     ngx_http_hc_match_t            *match;
-    ngx_http_hc_upstream_t         *upstream;
-    ngx_uint_t                      index;       /* bit in peer->failing */
+    ngx_uint_t                      bit;         /* in peer->down */
     ngx_msec_t                      interval;
     ngx_str_t                       uri;
     ngx_str_t                       request;
@@ -95,12 +83,8 @@ typedef struct {
 
 
 typedef struct {
-    /* ngx_http_hc_match_t */
-    ngx_array_t                         matches;
-    /* ngx_http_hc_t */
-    ngx_array_t                         checks;
-    /* ngx_http_hc_upstream_t * */
-    ngx_array_t                         upstreams;
+    ngx_array_t                     matches;     /* ngx_http_hc_match_t */
+    ngx_array_t                     checks;      /* ngx_http_hc_t */
 } ngx_http_hc_main_conf_t;
 
 
