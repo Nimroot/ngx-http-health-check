@@ -336,8 +336,7 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
         }
 
         if (hc[i].match_name.len) {
-            hc[i].match = ngx_http_hc_match_find(&hmcf->matches,
-                                                 &hc[i].match_name);
+            hc[i].match = ngx_http_hc_match_find(hmcf, &hc[i].match_name);
 
             if (hc[i].match == NULL) {
                 ngx_log_error(NGX_LOG_EMERG, cf->log, 0,

@@ -32,46 +32,9 @@
 #endif
 
 
-enum {
-    NGX_HTTP_HC_STATUS = 0,
-    NGX_HTTP_HC_HEADER,
-    NGX_HTTP_HC_BODY
-};
-
-
-enum {
-    NGX_HTTP_HC_HEADER_PRESENT = 0,             /* header Name;          */
-    NGX_HTTP_HC_HEADER_ABSENT,                  /* header ! Name;        */
-    NGX_HTTP_HC_HEADER_EQ,                      /* header Name = value;  */
-    NGX_HTTP_HC_HEADER_NE,                      /* header Name != value; */
-    NGX_HTTP_HC_HEADER_RE,                      /* header Name ~ regex;  */
-    NGX_HTTP_HC_HEADER_NRE                      /* header Name !~ regex; */
-};
-
-
 typedef struct {
-    ngx_uint_t                          low;
-    ngx_uint_t                          high;
-} ngx_http_hc_range_t;
-
-
-typedef struct {
-    ngx_uint_t                          type;
-    ngx_uint_t                          op;        /* header tests */
-    ngx_uint_t                          negate;    /* status and body tests */
-    /* ngx_http_hc_range_t */
-    ngx_array_t                        *ranges;
-    ngx_str_t                           name;
-    ngx_str_t                           value;
-    ngx_regex_t                        *regex;
-    ngx_str_t                           text;      /* the test as written */
-} ngx_http_hc_test_t;
-
-
-typedef struct {
-    ngx_str_t                           name;
-    /* ngx_http_hc_test_t */
-    ngx_array_t                         tests;
+    ngx_str_t                       name;
+    ngx_array_t                     tests;       /* ngx_http_hc_test_t */
 } ngx_http_hc_match_t;
 
 
@@ -143,7 +106,7 @@ extern ngx_module_t  ngx_http_health_check_module;
 
 char *ngx_http_hc_match_block(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
-ngx_http_hc_match_t *ngx_http_hc_match_find(ngx_array_t *matches,
+ngx_http_hc_match_t *ngx_http_hc_match_find(ngx_http_hc_main_conf_t *hmcf,
     ngx_str_t *name);
 u_char *ngx_http_hc_match_response(ngx_http_hc_match_t *match,
     ngx_pool_t *pool, ngx_uint_t status, ngx_array_t *headers,
