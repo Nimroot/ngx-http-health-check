@@ -87,7 +87,7 @@ ngx_int_t
 ngx_http_hc_init_process(ngx_cycle_t *cycle)
 {
     ngx_uint_t                i;
-    ngx_http_hc_t           **checks;
+    ngx_http_hc_t            *hc;
     ngx_http_hc_upstream_t  **ups;
     ngx_http_hc_main_conf_t  *hmcf;
 
@@ -117,14 +117,15 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
         }
     }
 
-    checks = hmcf->checks.elts;
-    for (i = 0; i < hmcf->checks.nelts; i++) {
-        checks[i]->timer.handler = ngx_http_hc_run;
-        checks[i]->timer.data = checks[i];
-        checks[i]->timer.log = cycle->log;
-        checks[i]->timer.cancelable = 1;
+    hc = hmcf->checks.elts;
 
-        ngx_add_timer(&checks[i]->timer, 1);
+    for (i = 0; i < hmcf->checks.nelts; i++) {
+        hc[i].timer.handler = ngx_http_hc_run;
+        hc[i].timer.data = &hc[i];
+        hc[i].timer.log = cycle->log;
+        hc[i].timer.cancelable = 1;
+
+        ngx_add_timer(&hc[i].timer, 1);
     }
 
     return NGX_OK;

@@ -126,8 +126,7 @@ ngx_http_hc_create_main_conf(ngx_conf_t *cf)
     if (ngx_array_init(&hmcf->matches, cf->pool, 4,
                        sizeof(ngx_http_hc_match_t))
         != NGX_OK
-        || ngx_array_init(&hmcf->checks, cf->pool, 4,
-                          sizeof(ngx_http_hc_t *))
+        || ngx_array_init(&hmcf->checks, cf->pool, 4, sizeof(ngx_http_hc_t))
            != NGX_OK
         || ngx_array_init(&hmcf->upstreams, cf->pool, 4,
                           sizeof(ngx_http_hc_upstream_t *))
@@ -147,33 +146,32 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_hc_main_conf_t *hmcf = conf;
 
-    u_char               *p;
-    ngx_str_t            *value, s, *u;
-    ngx_int_t             ms;
-    ngx_uint_t            i;
-    ngx_http_conf_ctx_t  *ctx;
-    ngx_http_hc_t        *check, **cp;
+    u_char         *p;
+    ngx_str_t      *value, s, *u;
+    ngx_int_t       ms;
+    ngx_uint_t      i;
+    ngx_http_hc_t  *hc;
 
-    check = ngx_pcalloc(cf->pool, sizeof(ngx_http_hc_t));
-    if (check == NULL) {
+    hc = ngx_array_push(&hmcf->checks);
+    if (hc == NULL) {
         return NGX_CONF_ERROR;
     }
 
-    check->interval = 5000;
-    ngx_str_set(&check->uri, "/");
+    ngx_memzero(hc, sizeof(ngx_http_hc_t));
 
-    ctx = cf->ctx;
-    check->loc_conf = ctx->loc_conf;
-    check->file = cf->conf_file->file.name;
-    check->line = cf->conf_file->line;
+    hc->interval = 5000;
+    ngx_str_set(&hc->uri, "/");
+    hc->loc_conf = ((ngx_http_conf_ctx_t *) cf->ctx)->loc_conf;
+    hc->file = cf->conf_file->file.name;
+    hc->line = cf->conf_file->line;
 
     value = cf->args->elts;
 
     for (i = 1; i < cf->args->nelts; i++) {
 
         if (ngx_strncmp(value[i].data, "interval=", 9) == 0) {
-            s.len = value[i].len - 9;
             s.data = value[i].data + 9;
+            s.len = value[i].len - 9;
 
             ms = ngx_parse_time(&s, 0);
             if (ms == NGX_ERROR || ms == 0) {
@@ -183,13 +181,13 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 return NGX_CONF_ERROR;
             }
 
-            check->interval = (ngx_msec_t) ms;
+            hc->interval = (ngx_msec_t) ms;
             continue;
         }
 
         if (ngx_strncmp(value[i].data, "uri=", 4) == 0) {
-            s.len = value[i].len - 4;
             s.data = value[i].data + 4;
+            s.len = value[i].len - 4;
 
             if (s.len == 0) {
                 goto invalid;
@@ -205,19 +203,15 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 }
             }
 
-            check->uri = s;
+            hc->uri = s;
             continue;
         }
 
-        if (ngx_strncmp(value[i].data, "match=", 6) == 0) {
-            s.len = value[i].len - 6;
-            s.data = value[i].data + 6;
-
-            if (s.len == 0) {
-                goto invalid;
-            }
-
-            check->match_name = s;
+        if (ngx_strncmp(value[i].data, "match=", 6) == 0
+            && value[i].len > 6)
+        {
+            hc->match_name.data = value[i].data + 6;
+            hc->match_name.len = value[i].len - 6;
             continue;
         }
 
@@ -237,13 +231,6 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
         goto invalid;
     }
-
-    cp = ngx_array_push(&hmcf->checks);
-    if (cp == NULL) {
-        return NGX_CONF_ERROR;
-    }
-
-    *cp = check;
 
     return NGX_CONF_OK;
 
@@ -328,19 +315,18 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
     ngx_http_upstream_conf_t      *ucf;
     ngx_http_proxy_loc_conf_t     *plcf;
     ngx_http_upstream_srv_conf_t  *uscf;
-    ngx_http_hc_t                 *check, **checks;
+    ngx_http_hc_t                 *hc;
     ngx_http_hc_upstream_t        *up;
     ngx_http_hc_main_conf_t       *hmcf;
 
     hmcf = ngx_http_conf_get_module_main_conf(cf,
                                               ngx_http_health_check_module);
 
-    checks = hmcf->checks.elts;
+    hc = hmcf->checks.elts;
 
     for (i = 0; i < hmcf->checks.nelts; i++) {
-        check = checks[i];
 
-        plcf = check->loc_conf[ngx_http_proxy_module.ctx_index];
+        plcf = hc[i].loc_conf[ngx_http_proxy_module.ctx_index];
         ucf = &plcf->upstream;
         uscf = ucf->upstream;
 
@@ -348,13 +334,13 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "\"health_check\" needs \"proxy_pass\" to an "
                           "upstream group (without variables) in the same "
-                          "location in %V:%ui", &check->file, check->line);
+                          "location in %V:%ui", &hc[i].file, hc[i].line);
             return NGX_ERROR;
         }
 
 #if (NGX_HTTP_SSL)
         if (plcf->ssl
-            && ngx_http_hc_ssl_conf(cf, check, plcf) != NGX_OK)
+            && ngx_http_hc_ssl_conf(cf, &hc[i], plcf) != NGX_OK)
         {
             return NGX_ERROR;
         }
@@ -364,7 +350,7 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
                           "\"health_check\" over https needs "
                           "ngx_http_health_check_module built with "
                           "--with-http_ssl_module in %V:%ui",
-                          &check->file, check->line);
+                          &hc[i].file, hc[i].line);
             return NGX_ERROR;
         }
 #endif
@@ -373,17 +359,17 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "upstream \"%V\" must reside in shared memory "
                           "(add a \"zone\" directive) for \"health_check\" "
-                          "in %V:%ui", &uscf->host, &check->file, check->line);
+                          "in %V:%ui", &uscf->host, &hc[i].file, hc[i].line);
             return NGX_ERROR;
         }
 
-        if (check->match_name.len) {
-            check->match = ngx_http_hc_match_find(&hmcf->matches,
-                                                  &check->match_name);
-            if (check->match == NULL) {
+        if (hc[i].match_name.len) {
+            hc[i].match = ngx_http_hc_match_find(&hmcf->matches,
+                                                 &hc[i].match_name);
+            if (hc[i].match == NULL) {
                 ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                               "match \"%V\" not found in %V:%ui",
-                              &check->match_name, &check->file, check->line);
+                              &hc[i].match_name, &hc[i].file, hc[i].line);
                 return NGX_ERROR;
             }
         }
@@ -396,16 +382,16 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
         if (up->nchecks == NGX_HTTP_HC_MAX_CHECKS) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "too many health checks for upstream \"%V\" "
-                          "in %V:%ui", &uscf->host, &check->file, check->line);
+                          "in %V:%ui", &uscf->host, &hc[i].file, hc[i].line);
             return NGX_ERROR;
         }
 
-        check->upstream = up;
-        check->index = up->nchecks++;
+        hc[i].upstream = up;
+        hc[i].index = up->nchecks++;
 
-        check->connect_timeout = ucf->connect_timeout;
-        check->send_timeout = ucf->send_timeout;
-        check->read_timeout = ucf->read_timeout;
+        hc[i].connect_timeout = ucf->connect_timeout;
+        hc[i].send_timeout = ucf->send_timeout;
+        hc[i].read_timeout = ucf->read_timeout;
 
         /*
          * Host is $proxy_host, the upstream group's name. HTTP/2 isn't
@@ -413,9 +399,9 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
          */
 
         host = &uscf->host;
-        check->http11 = (plcf->http_version >= NGX_HTTP_VERSION_11);
+        hc[i].http11 = (plcf->http_version >= NGX_HTTP_VERSION_11);
 
-        len = sizeof("GET ") - 1 + check->uri.len
+        len = sizeof("GET ") - 1 + hc[i].uri.len
               + sizeof(" HTTP/1.x" CRLF "Host: ") - 1 + host->len
               + sizeof(CRLF "Connection: close" CRLF CRLF) - 1;
 
@@ -424,13 +410,13 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
             return NGX_ERROR;
         }
 
-        check->request.data = p;
-        check->request.len = ngx_sprintf(p, "GET %V HTTP/1.%c" CRLF
-                                            "Host: %V" CRLF
-                                            "Connection: close" CRLF CRLF,
-                                         &check->uri,
-                                         check->http11 ? '1' : '0', host)
-                             - p;
+        hc[i].request.data = p;
+        hc[i].request.len = ngx_sprintf(p, "GET %V HTTP/1.%c" CRLF
+                                           "Host: %V" CRLF
+                                           "Connection: close" CRLF CRLF,
+                                        &hc[i].uri,
+                                        hc[i].http11 ? '1' : '0', host)
+                            - p;
     }
 
     return NGX_OK;

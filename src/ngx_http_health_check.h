@@ -143,7 +143,7 @@ typedef struct {
 typedef struct {
     /* ngx_http_hc_match_t */
     ngx_array_t                         matches;
-    /* ngx_http_hc_t * */
+    /* ngx_http_hc_t */
     ngx_array_t                         checks;
     /* ngx_http_hc_upstream_t * */
     ngx_array_t                         upstreams;
