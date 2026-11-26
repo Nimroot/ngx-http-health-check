@@ -115,9 +115,9 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   every worker. Worker 0 runs all checks.
 - A check opens a new connection to each server and sends `GET <uri>` with
   the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
-  `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is set to the
-  group name (Plus's default `$proxy_host`), plus `Connection: close`. It
-  uses the location's `proxy_connect_timeout`, `proxy_send_timeout` and
+  `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is
+  `$proxy_host` (the group's name), plus `Connection: close`. It uses the
+  location's `proxy_connect_timeout`, `proxy_send_timeout` and
   `proxy_read_timeout`.
 - With `proxy_pass https://`, the check does a TLS handshake first, with the
   location's settings as requests do: `proxy_ssl_protocols`,

@@ -301,7 +301,6 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
 {
     u_char                     *p;
     size_t                      len;
-    ngx_str_t                  *host;
     ngx_uint_t                  i;
     ngx_http_hc_t              *hc;
     ngx_http_hc_upstream_t     *up;
@@ -365,16 +364,15 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
         hc[i].index = up->nchecks++;
 
         /*
-         * Host is $proxy_host, the upstream group's name. HTTP/2 isn't
-         * spoken by probes: with proxy_http_version 2 they use HTTP/1.1.
+         * Host is $proxy_host. Probes don't speak HTTP/2: with
+         * proxy_http_version 2 they use HTTP/1.1.
          */
 
-        host = &hc[i].uscf->host;
         hc[i].http11 = (plcf->http_version >= NGX_HTTP_VERSION_11);
 
-        len = sizeof("GET ") - 1 + hc[i].uri.len
-              + sizeof(" HTTP/1.x" CRLF "Host: ") - 1 + host->len
-              + sizeof(CRLF "Connection: close" CRLF CRLF) - 1;
+        len = sizeof("GET  HTTP/1.x" CRLF "Host: " CRLF
+                     "Connection: close" CRLF CRLF) - 1
+              + hc[i].uri.len + plcf->vars.host_header.len;
 
         p = ngx_pnalloc(cf->pool, len);
         if (p == NULL) {
@@ -386,7 +384,8 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
                                            "Host: %V" CRLF
                                            "Connection: close" CRLF CRLF,
                                         &hc[i].uri,
-                                        hc[i].http11 ? '1' : '0', host)
+                                        hc[i].http11 ? '1' : '0',
+                                        &plcf->vars.host_header)
                             - p;
 
 #if (NGX_HTTP_SSL)
