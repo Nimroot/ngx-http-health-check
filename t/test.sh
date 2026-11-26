@@ -238,7 +238,8 @@ is     "srv: config-down SRV server not probed" "$(cx "wc -l < /tmp/srv-health.l
 # --- response framing -------------------------------------------------------------
 # 127.0.0.1:9301 (socat) sends /tmp/raw/resp verbatim and closes. While it
 # is healthy, requests get its response ("ok", 204, or 502 if nginx's proxy
-# rejects it); once it is unhealthy, the backup server 9102 answers.
+# rejects it); once it is unhealthy, the backup server 9102 answers. hc_raw
+# probes with HTTP/1.0, hc_raw11 with HTTP/1.1.
 
 ok_resp='HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 
@@ -262,10 +263,6 @@ raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nok\n'
 expect "raw: repeated Content-Length fails, as for the proxy" /raw/ 9102
 raw "$ok_resp"
 expect "raw: complete response passes again"   /raw/ ok
-since=$(date +%s)
-raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nok\n\r\n0\r\n\r\n'
-expect "raw: Transfer-Encoding fails"          /raw/ 9102
-logged "reason: Transfer-Encoding" 'is unhealthy: unsupported Transfer-Encoding'
 raw 'HTTP/1.1 200 OK\r\nContent-Length : 100\r\n\r\nok\n'
 expect "raw: whitespace before colon fails"    /raw/ 9102
 raw "$ok_resp"
@@ -283,10 +280,9 @@ logged "reason: TLS instead of HTTP" 'is unhealthy: TLS data instead of an HTTP 
 raw "$ok_resp"
 expect "raw: healthy at the end"               /raw/ ok
 
-# hc_raw11 probes the same socat with HTTP/1.1 (nginx's default
-# proxy_http_version) and match body ~ "^ok$", which the chunks fail.
+# hc_raw11 has match body ~ "^ok$", which the chunks would fail.
 
-echo "chunked responses (HTTP/1.1 probes)"
+echo "chunked responses"
 expect "raw11: complete response passes"       /raw11/ ok
 since=$(date +%s)
 raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nok\n\r\n'
@@ -295,7 +291,7 @@ logged "reason: incomplete chunked body" \
        'peer 127.0.0.1:9301 in upstream "hc_raw11" is unhealthy: connection closed before the response body was complete'
 raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\no\r\n2\r\nk\n\r\n0\r\n\r\n'
 expect "raw11: chunks decoded, healthy again"  /raw11/ ok
-expect "raw: HTTP/1.0 probe rejects chunked"   /raw/ 9102
+expect "raw: chunked for HTTP/1.0 decoded, as by the proxy" /raw/ ok
 since=$(date +%s)
 raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n3\r\nok\n\r\n0\r\n\r\n'
 expect "raw11: with Content-Length fails"      /raw11/ 9102

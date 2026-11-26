@@ -771,8 +771,8 @@ ngx_http_hc_dummy(ngx_event_t *ev)
  *
  * The body of a response with status 1xx, 204 or 304 is empty, whatever
  * its header says (RFC 9112, 6.3). Any other body is delimited by
- * Content-Length, by "Transfer-Encoding: chunked" in answer to an HTTP/1.1
- * request, or by the end of the connection. As for nginx's proxy, any other
+ * Content-Length, by "Transfer-Encoding: chunked", or by the end of the
+ * connection. As for nginx's proxy, any other
  * transfer coding, a second Content-Length or Transfer-Encoding, or both
  * together are an error; so is a field name the server may have meant as
  * Content-Length but isn't, which makes the length ambiguous.
@@ -926,8 +926,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
                 return NGX_ERROR;
             }
 
-            if (!probe->check->http11
-                || end - v != sizeof("chunked") - 1
+            if (end - v != sizeof("chunked") - 1
                 || ngx_strncasecmp(v, (u_char *) "chunked",
                                    sizeof("chunked") - 1)
                    != 0)

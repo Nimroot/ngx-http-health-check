@@ -367,8 +367,6 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
          * proxy_http_version 2 they use HTTP/1.1.
          */
 
-        hc[i].http11 = (plcf->http_version >= NGX_HTTP_VERSION_11);
-
         len = sizeof("GET  HTTP/1.x" CRLF "Host: " CRLF
                      "Connection: close" CRLF CRLF) - 1
               + hc[i].uri.len + plcf->vars.host_header.len;
@@ -383,7 +381,9 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
                                            "Host: %V" CRLF
                                            "Connection: close" CRLF CRLF,
                                         &hc[i].uri,
-                                        hc[i].http11 ? '1' : '0',
+                                        plcf->http_version
+                                            == NGX_HTTP_VERSION_10
+                                        ? '0' : '1',
                                         &plcf->vars.host_header)
                             - p;
 

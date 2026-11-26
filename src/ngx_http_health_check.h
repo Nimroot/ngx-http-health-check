@@ -71,8 +71,6 @@ typedef struct {
     ngx_uint_t                      index;       /* bit in peer->failing */
     ngx_msec_t                      interval;
     ngx_str_t                       uri;
-    /* HTTP/1.1 request (proxy_http_version 1.1 or 2), else HTTP/1.0 */
-    ngx_flag_t                      http11;
     ngx_str_t                       request;
 
 #if (NGX_HTTP_SSL)
