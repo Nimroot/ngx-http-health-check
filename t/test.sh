@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
-# Black-box tests against the test container (see the Makefile: make test).
-# Breaks and repairs backends (files in /tmp/hc/), changes DNS answers
-# (/tmp/dns/hosts), and checks where requests go. Then checks configuration
-# errors with `nginx -t`. Exit code = number of failures.
+# Black-box tests (see the Makefile: make test). Runs the test image in a
+# container of its own, breaks and repairs backends (files in /tmp/hc/),
+# changes DNS answers (/tmp/dns/hosts), and checks where requests go. Then
+# checks configuration errors with `nginx -t`. Exit code = number of failures.
 set -uo pipefail
 
-BASE="${BASE:-http://127.0.0.1:18082}"
-C="${CONTAINER:-ngx-health-check-test}"
 ENGINE="${ENGINE:-podman}"
+IMAGE="${IMAGE:-localhost/ngx-health-check-test:1.30.6}"
 WAIT="${WAIT:-8}"      # seconds to wait for a state change (checks run every 1s)
+C="ngx-health-check-test-$$"
 
 pass=0 fail=0
 ok()  { printf '  \e[32mPASS\e[0m %-56s %s\n' "$1" "$2"; ((pass++)); }
 bad() { printf '  \e[31mFAIL\e[0m %-56s %s\n' "$1" "$2"; ((fail++)); }
+
+"$ENGINE" run -d --name "$C" -p 127.0.0.1::8082 "$IMAGE" >/dev/null || exit 1
+cleanup() {
+    ((fail)) && "$ENGINE" logs "$C" 2>&1 | tail -n 40
+    "$ENGINE" rm -f "$C" >/dev/null
+}
+trap cleanup EXIT
+BASE="http://$("$ENGINE" port "$C" 8082/tcp | head -n 1)"
 
 cx() { "$ENGINE" exec "$C" sh -c "$1"; }
 set_state() { cx "mkdir -p /tmp/hc && rm -f /tmp/hc/* && ${1:-true}"; }

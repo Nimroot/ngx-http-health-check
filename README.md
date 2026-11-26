@@ -236,7 +236,8 @@ make test                                   # podman, nginx 1.30.6
 make test ENGINE=docker NGINX_VERSION=1.29.8
 ```
 
-Requirements: podman or docker, curl, bash.
+Each run uses a container of its own and a free port, so runs can go side
+by side. Requirements: podman or docker, curl, bash.
 
 ## License
 
