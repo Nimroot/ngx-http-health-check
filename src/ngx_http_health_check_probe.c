@@ -570,6 +570,11 @@ ngx_http_hc_ssl_handshaked(ngx_connection_t *c)
 #endif
 
 
+/*
+ * Sends the request. As for requests, the send timeout applies while the
+ * socket is full, the read timeout between two reads.
+ */
+
 static void
 ngx_http_hc_send(ngx_event_t *wev)
 {
@@ -584,8 +589,7 @@ ngx_http_hc_send(ngx_event_t *wev)
     check = probe->check;
 
     if (wev->timedout) {
-        ngx_http_hc_finish(probe, (u_char *)
-                           "timed out connecting or sending");
+        ngx_http_hc_finish(probe, (u_char *) "timed out sending the request");
         return;
     }
 
@@ -600,12 +604,10 @@ ngx_http_hc_send(ngx_event_t *wev)
         }
 
         if (n == NGX_AGAIN) {
-            if (!wev->timer_set) {
-                ngx_add_timer(wev, check->conf->send_timeout);
-            }
+            ngx_add_timer(wev, check->conf->send_timeout);
 
             if (ngx_handle_write_event(wev, 0) != NGX_OK) {
-                ngx_http_hc_abort(probe, (u_char *) "cannot wait to send");
+                ngx_http_hc_abort(probe, (u_char *) "cannot handle events");
             }
 
             return;
@@ -629,16 +631,7 @@ ngx_http_hc_send(ngx_event_t *wev)
 
     c->read->handler = ngx_http_hc_recv;
 
-    ngx_add_timer(c->read, check->conf->read_timeout);
-
-    if (c->read->ready) {
-        ngx_http_hc_recv(c->read);
-        return;
-    }
-
-    if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
-        ngx_http_hc_abort(probe, (u_char *) "cannot wait to read");
-    }
+    ngx_http_hc_recv(c->read);
 }
 
 
@@ -658,7 +651,8 @@ ngx_http_hc_recv(ngx_event_t *rev)
     b = &probe->buf;
 
     if (rev->timedout) {
-        ngx_http_hc_finish(probe, (u_char *) "timed out reading response");
+        ngx_http_hc_finish(probe,
+                           (u_char *) "timed out reading the response");
         return;
     }
 
@@ -705,9 +699,12 @@ ngx_http_hc_recv(ngx_event_t *rev)
         n = c->recv(c, b->last, b->end - b->last);
 
         if (n == NGX_AGAIN) {
+            ngx_add_timer(rev, probe->check->conf->read_timeout);
+
             if (ngx_handle_read_event(rev, 0) != NGX_OK) {
-                ngx_http_hc_abort(probe, (u_char *) "cannot wait to read");
+                ngx_http_hc_abort(probe, (u_char *) "cannot handle events");
             }
+
             return;
         }
 

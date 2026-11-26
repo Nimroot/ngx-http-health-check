@@ -1,8 +1,9 @@
 #!/bin/sh
 # Starts dnsmasq, which answers for dyn.test (the "resolve" tests) from
-# /tmp/dns/hosts and for the SRV record _http._tcp.srv.test, then socat,
-# which answers on 127.0.0.1:9301 with /tmp/raw/resp verbatim, then nginx.
-# test.sh rewrites those files (and sends dnsmasq SIGHUP).
+# /tmp/dns/hosts and for the SRV record _http._tcp.srv.test; socat on
+# 127.0.0.1:9301, which answers with /tmp/raw/resp verbatim, and on
+# 127.0.0.1:9302, which never answers; then nginx. test.sh rewrites those
+# files (and sends dnsmasq SIGHUP).
 set -e
 
 mkdir -p /tmp/dns /tmp/hc /tmp/raw
@@ -16,5 +17,6 @@ dnsmasq --keep-in-foreground --no-resolv --no-hosts \
         --listen-address=127.0.0.1 --port=5353 --bind-interfaces &
 
 socat TCP-LISTEN:9301,bind=127.0.0.1,reuseaddr,fork EXEC:/raw.sh &
+socat -u TCP-LISTEN:9302,bind=127.0.0.1,reuseaddr,fork /dev/null &
 
 exec nginx -g 'daemon off;'

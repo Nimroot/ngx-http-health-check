@@ -116,18 +116,18 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 - A check opens a new connection to each server and sends `GET <uri>` with
   the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
   `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is
-  `$proxy_host` (the group's name), plus `Connection: close`. It uses the
-  location's `proxy_connect_timeout`, `proxy_send_timeout` and
-  `proxy_read_timeout`.
+  `$proxy_host` (the group's name), plus `Connection: close`.
+- Timeouts are the location's, as for requests: `proxy_connect_timeout` to
+  connect (and for the TLS handshake), `proxy_send_timeout` while the request
+  can't be sent, `proxy_read_timeout` between two reads of the response.
 - With `proxy_pass https://`, the check does a TLS handshake first, with the
   location's settings as requests do: `proxy_ssl_protocols`,
   `proxy_ssl_ciphers`, `proxy_ssl_certificate` and
   `proxy_ssl_certificate_key`, `proxy_ssl_trusted_certificate` (such as a
   private CA), `proxy_ssl_verify`, `proxy_ssl_server_name` (SNI) and
-  `proxy_ssl_name`, which defaults to the group name. The handshake must be
-  done within `proxy_connect_timeout`. A failed handshake or certificate
-  check fails the check, with the reason in the log. Each check does a full
-  handshake (no session reuse).
+  `proxy_ssl_name`, which defaults to the group name. A failed handshake or
+  certificate check fails the check, with the reason in the log. Each check
+  does a full handshake (no session reuse).
 - The result sets the server's `down` flag in shared memory. Every
   load-balancing method (round robin, `hash`, `ip_hash`, `least_conn`,
   `random`) already skips down servers. The module also keeps the group's
@@ -228,6 +228,7 @@ where requests go:
 - HTTP/1.1 checks: chunked bodies decoded for `match`, incomplete or
   invalid ones failing; an HTTP/1.0 check failing on a server that answers
   HTTP/1.0 with 426, as Envoy does by default;
+- a server that never answers fails on `proxy_read_timeout`;
 - `https://` checks: SNI, verification against a private CA, and failures
   for a certificate for another name or from another CA;
 - more servers than free connections in worker 0 don't make any check fail;
