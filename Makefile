@@ -12,7 +12,9 @@ PORT           ?= 18082
 
 .PHONY: test check image clean
 
-test: image check
+# check only once the image is built, also with make -j
+test: image
+	@$(MAKE) --no-print-directory check
 
 check:
 	-@$(ENGINE) rm -f $(CONTAINER) >/dev/null 2>&1
