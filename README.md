@@ -215,6 +215,7 @@ where requests go:
 - groups without `health_check` and servers that are `down` in the
   configuration are left alone; with no healthy server, requests get 502;
 - `proxy_next_upstream` counts only healthy servers;
+- with two checks of one group, a server is used only while it passes both;
 - with `resolve`, servers added by DNS are checked, and removing an unhealthy
   server leaves the count of usable servers correct (dnsmasq in the container
   serves the changing answers); an SRV server marked `down` gets neither

@@ -170,6 +170,22 @@ set_state
 expect "default: both servers"                 /default/   9101,9102
 expect "match: both servers"                   /match/     9101,9102
 
+# --- two checks of one group ---------------------------------------------------
+# hc_two is checked on /health and on /ready: a server is used only while
+# it passes both.
+
+echo "two checks: 9101 fails both"
+set_state "touch /tmp/hc/9101.fail /tmp/hc/9101.unready"
+expect "two: 9101 taken out"                   /two/ 9102
+cx "rm /tmp/hc/9101.fail"
+sleep 2
+now    "two: 9101 still out, fails /ready"     /two/ 9102
+
+echo "two checks: 9101 passes both"
+since=$(date +%s); set_state
+expect "two: 9101 back"                        /two/ 9101,9102
+logged "two: healthy" 'peer 127.0.0.1:9101 in upstream "hc_two" is healthy'
+
 # --- servers from DNS ("resolve") ----------------------------------------------
 # nginx re-resolves dyn.test every second (resolver valid=1s).
 
