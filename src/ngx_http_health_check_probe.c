@@ -12,18 +12,17 @@
 #include "ngx_http_health_check.h"
 
 
-#define NGX_HTTP_HEALTH_CHECK_BODY_MAX    (256 * 1024)
-#define NGX_HTTP_HEALTH_CHECK_HEADER_MAX  (32 * 1024)
-#define NGX_HTTP_HEALTH_CHECK_BUF_MAX                                        \
-    (NGX_HTTP_HEALTH_CHECK_HEADER_MAX + NGX_HTTP_HEALTH_CHECK_BODY_MAX)
-#define NGX_HTTP_HEALTH_CHECK_BUF_INIT    4096
+#define NGX_HTTP_HC_BODY_MAX    (256 * 1024)
+#define NGX_HTTP_HC_HEADER_MAX  (32 * 1024)
+#define NGX_HTTP_HC_BUF_MAX     (NGX_HTTP_HC_HEADER_MAX + NGX_HTTP_HC_BODY_MAX)
+#define NGX_HTTP_HC_BUF_INIT    4096
 
 
-typedef struct ngx_http_health_check_probe_s  ngx_http_health_check_probe_t;
+typedef struct ngx_http_hc_probe_s  ngx_http_hc_probe_t;
 
 /* One check of one server, in its own pool. */
-struct ngx_http_health_check_probe_s {
-    ngx_http_health_check_t            *check;
+struct ngx_http_hc_probe_s {
+    ngx_http_hc_t                       *check;
     ngx_pool_t                         *pool;
     ngx_peer_connection_t               pc;
     struct sockaddr                    *sockaddr;
@@ -35,9 +34,9 @@ struct ngx_http_health_check_probe_s {
     ngx_uint_t                          status;
     size_t                              header_len;
     off_t                               content_length;
-    /* ngx_http_health_check_header_t */
+    /* ngx_http_hc_header_t */
     ngx_array_t                        *headers;
-    /* why ngx_http_health_check_parse() rejected the response */
+    /* why ngx_http_hc_parse() rejected the response */
     u_char                             *error;
 
     /* in the round's list, then in the waiting queue */
@@ -53,48 +52,44 @@ struct ngx_http_health_check_probe_s {
  * Probes wait in a queue and at most max_active of them have a connection
  * at a time, so that a round doesn't take every connection of worker 0.
  */
-static ngx_queue_t  ngx_http_health_check_waiting;
-static ngx_uint_t   ngx_http_health_check_active;
-static ngx_uint_t   ngx_http_health_check_max_active;
-static ngx_uint_t   ngx_http_health_check_starting;
+static ngx_queue_t  ngx_http_hc_waiting;
+static ngx_uint_t   ngx_http_hc_active;
+static ngx_uint_t   ngx_http_hc_max_active;
+static ngx_uint_t   ngx_http_hc_starting;
 
 
-static void ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
-    ngx_queue_t *list);
-static void ngx_http_health_check_start(void);
-static void ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe);
+static void ngx_http_hc_prune(ngx_http_hc_upstream_t *up, ngx_queue_t *list);
+static void ngx_http_hc_start(void);
+static void ngx_http_hc_connect(ngx_http_hc_probe_t *probe);
 #if (NGX_HTTP_SSL)
-static void ngx_http_health_check_ssl_init(ngx_event_t *ev);
-static void ngx_http_health_check_ssl_handshaked(ngx_connection_t *c);
+static void ngx_http_hc_ssl_init(ngx_event_t *ev);
+static void ngx_http_hc_ssl_handshaked(ngx_connection_t *c);
 #endif
-static void ngx_http_health_check_send(ngx_event_t *wev);
-static void ngx_http_health_check_recv(ngx_event_t *rev);
-static void ngx_http_health_check_dummy(ngx_event_t *ev);
-static ngx_int_t ngx_http_health_check_parse(
-    ngx_http_health_check_probe_t *probe, ngx_uint_t store);
-static ngx_int_t ngx_http_health_check_dechunk(
-    ngx_http_health_check_probe_t *probe, u_char *out, size_t *len);
-static void ngx_http_health_check_evaluate(
-    ngx_http_health_check_probe_t *probe);
-static void ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
-    u_char *reason);
-static void ngx_http_health_check_abort(ngx_http_health_check_probe_t *probe,
-    u_char *reason);
-static void ngx_http_health_check_close(ngx_http_health_check_probe_t *probe);
-static ngx_uint_t ngx_http_health_check_admin_down(
-    ngx_http_health_check_upstream_t *up, ngx_http_upstream_rr_peer_t *peer);
+static void ngx_http_hc_send(ngx_event_t *wev);
+static void ngx_http_hc_recv(ngx_event_t *rev);
+static void ngx_http_hc_dummy(ngx_event_t *ev);
+static ngx_int_t ngx_http_hc_parse(ngx_http_hc_probe_t *probe,
+    ngx_uint_t store);
+static ngx_int_t ngx_http_hc_dechunk(ngx_http_hc_probe_t *probe, u_char *out,
+    size_t *len);
+static void ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe);
+static void ngx_http_hc_finish(ngx_http_hc_probe_t *probe, u_char *reason);
+static void ngx_http_hc_abort(ngx_http_hc_probe_t *probe, u_char *reason);
+static void ngx_http_hc_close(ngx_http_hc_probe_t *probe);
+static ngx_uint_t ngx_http_hc_admin_down(ngx_http_hc_upstream_t *up,
+    ngx_http_upstream_rr_peer_t *peer);
 
 
 void
-ngx_http_health_check_probe_init(ngx_cycle_t *cycle)
+ngx_http_hc_probe_init(ngx_cycle_t *cycle)
 {
-    ngx_queue_init(&ngx_http_health_check_waiting);
+    ngx_queue_init(&ngx_http_hc_waiting);
 
-    ngx_http_health_check_active = 0;
-    ngx_http_health_check_starting = 0;
+    ngx_http_hc_active = 0;
+    ngx_http_hc_starting = 0;
 
     /* the rest is left to client connections */
-    ngx_http_health_check_max_active = ngx_max(cycle->connection_n / 4, 1);
+    ngx_http_hc_max_active = ngx_max(cycle->connection_n / 4, 1);
 }
 
 
@@ -110,7 +105,7 @@ ngx_http_health_check_probe_init(ngx_cycle_t *cycle)
  */
 
 static ngx_uint_t
-ngx_http_health_check_admin_down(ngx_http_health_check_upstream_t *up,
+ngx_http_hc_admin_down(ngx_http_hc_upstream_t *up,
     ngx_http_upstream_rr_peer_t *peer)
 {
     ngx_uint_t                    i, j;
@@ -153,16 +148,16 @@ ngx_http_health_check_admin_down(ngx_http_health_check_upstream_t *up,
 /* Timer: probe every server of the group, primary and backup. */
 
 void
-ngx_http_health_check_run(ngx_event_t *ev)
+ngx_http_hc_run(ngx_event_t *ev)
 {
-    ngx_uint_t                         complete;
-    ngx_pool_t                        *pool;
-    ngx_queue_t                        list;
-    ngx_http_upstream_rr_peer_t       *peer;
-    ngx_http_upstream_rr_peers_t      *peers;
-    ngx_http_health_check_t           *check;
-    ngx_http_health_check_probe_t     *probe;
-    ngx_http_health_check_upstream_t  *up;
+    ngx_uint_t                     complete;
+    ngx_pool_t                    *pool;
+    ngx_queue_t                    list;
+    ngx_http_upstream_rr_peer_t   *peer;
+    ngx_http_upstream_rr_peers_t  *peers;
+    ngx_http_hc_t                 *check;
+    ngx_http_hc_probe_t           *probe;
+    ngx_http_hc_upstream_t        *up;
 
     check = ev->data;
     up = check->upstream;
@@ -180,7 +175,7 @@ ngx_http_health_check_run(ngx_event_t *ev)
 
         for (peer = peers->peer; peer; peer = peer->next) {
 
-            if (ngx_http_health_check_admin_down(up, peer)) {
+            if (ngx_http_hc_admin_down(up, peer)) {
                 continue;
             }
 
@@ -190,7 +185,7 @@ ngx_http_health_check_run(ngx_event_t *ev)
                 continue;
             }
 
-            probe = ngx_pcalloc(pool, sizeof(ngx_http_health_check_probe_t));
+            probe = ngx_pcalloc(pool, sizeof(ngx_http_hc_probe_t));
             if (probe == NULL) {
                 ngx_destroy_pool(pool);
                 complete = 0;
@@ -226,7 +221,7 @@ ngx_http_health_check_run(ngx_event_t *ev)
      */
 
     if (complete) {
-        ngx_http_health_check_prune(up, &list);
+        ngx_http_hc_prune(up, &list);
     }
 
     if (ngx_queue_empty(&list)) {
@@ -236,9 +231,9 @@ ngx_http_health_check_run(ngx_event_t *ev)
 
     /* the next round is scheduled when the last probe finishes */
 
-    ngx_queue_add(&ngx_http_health_check_waiting, &list);
+    ngx_queue_add(&ngx_http_hc_waiting, &list);
 
-    ngx_http_health_check_start();
+    ngx_http_hc_start();
 }
 
 
@@ -248,13 +243,12 @@ ngx_http_health_check_run(ngx_event_t *ev)
  */
 
 static void
-ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
-    ngx_queue_t *list)
+ngx_http_hc_prune(ngx_http_hc_upstream_t *up, ngx_queue_t *list)
 {
-    ngx_uint_t                      i;
-    ngx_queue_t                    *q;
-    ngx_http_health_check_peer_t   *st;
-    ngx_http_health_check_probe_t  *probe;
+    ngx_uint_t            i;
+    ngx_queue_t          *q;
+    ngx_http_hc_peer_t   *st;
+    ngx_http_hc_probe_t  *probe;
 
     st = up->peers->elts;
     i = 0;
@@ -265,7 +259,7 @@ ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
              q != ngx_queue_sentinel(list);
              q = ngx_queue_next(q))
         {
-            probe = ngx_queue_data(q, ngx_http_health_check_probe_t, queue);
+            probe = ngx_queue_data(q, ngx_http_hc_probe_t, queue);
 
             if (ngx_cmp_sockaddr(st[i].sockaddr, st[i].socklen,
                                  probe->sockaddr, probe->socklen, 1)
@@ -289,45 +283,45 @@ ngx_http_health_check_prune(ngx_http_health_check_upstream_t *up,
 /* Starts waiting probes while fewer than max_active are running. */
 
 static void
-ngx_http_health_check_start(void)
+ngx_http_hc_start(void)
 {
-    ngx_queue_t                    *q;
-    ngx_http_health_check_probe_t  *probe;
+    ngx_queue_t          *q;
+    ngx_http_hc_probe_t  *probe;
 
     /* a probe that ends at once calls this again: the loop goes on */
 
-    if (ngx_http_health_check_starting) {
+    if (ngx_http_hc_starting) {
         return;
     }
 
-    ngx_http_health_check_starting = 1;
+    ngx_http_hc_starting = 1;
 
-    while (ngx_http_health_check_active < ngx_http_health_check_max_active
-           && !ngx_queue_empty(&ngx_http_health_check_waiting)
+    while (ngx_http_hc_active < ngx_http_hc_max_active
+           && !ngx_queue_empty(&ngx_http_hc_waiting)
            && !ngx_exiting && !ngx_quit && !ngx_terminate)
     {
-        q = ngx_queue_head(&ngx_http_health_check_waiting);
+        q = ngx_queue_head(&ngx_http_hc_waiting);
         ngx_queue_remove(q);
 
-        probe = ngx_queue_data(q, ngx_http_health_check_probe_t, queue);
+        probe = ngx_queue_data(q, ngx_http_hc_probe_t, queue);
 
         probe->started = 1;
-        ngx_http_health_check_active++;
+        ngx_http_hc_active++;
 
-        ngx_http_health_check_connect(probe);
+        ngx_http_hc_connect(probe);
     }
 
-    ngx_http_health_check_starting = 0;
+    ngx_http_hc_starting = 0;
 }
 
 
 static void
-ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe)
+ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
 {
-    ngx_int_t                 rc;
-    ngx_connection_t         *c;
-    ngx_peer_connection_t    *pc;
-    ngx_http_health_check_t  *check;
+    ngx_int_t               rc;
+    ngx_connection_t       *c;
+    ngx_peer_connection_t  *pc;
+    ngx_http_hc_t          *check;
 
     check = probe->check;
     pc = &probe->pc;
@@ -344,26 +338,25 @@ ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe)
     /* NGX_DECLINED: connect() failed; NGX_ERROR: no socket or connection */
 
     if (rc == NGX_DECLINED) {
-        ngx_http_health_check_finish(probe, (u_char *) "connect() failed");
+        ngx_http_hc_finish(probe, (u_char *) "connect() failed");
         return;
     }
 
     if (rc != NGX_OK && rc != NGX_AGAIN) {
-        ngx_http_health_check_abort(probe,
-                                    (u_char *) "cannot open a connection");
+        ngx_http_hc_abort(probe, (u_char *) "cannot open a connection");
         return;
     }
 
     c = pc->connection;
     c->data = probe;
     c->pool = probe->pool;
-    c->read->handler = ngx_http_health_check_recv;
-    c->write->handler = ngx_http_health_check_send;
+    c->read->handler = ngx_http_hc_recv;
+    c->write->handler = ngx_http_hc_send;
 
 #if (NGX_HTTP_SSL)
     if (check->ssl) {
-        c->read->handler = ngx_http_health_check_ssl_init;
-        c->write->handler = ngx_http_health_check_ssl_init;
+        c->read->handler = ngx_http_hc_ssl_init;
+        c->write->handler = ngx_http_hc_ssl_init;
     }
 #endif
 
@@ -387,23 +380,22 @@ ngx_http_health_check_connect(ngx_http_health_check_probe_t *probe)
 /* Connected (or failed to): starts the SSL handshake. */
 
 static void
-ngx_http_health_check_ssl_init(ngx_event_t *ev)
+ngx_http_hc_ssl_init(ngx_event_t *ev)
 {
-    int                             err;
-    socklen_t                       len;
-    ngx_int_t                       rc;
-    ngx_uint_t                      failed;
-    ngx_connection_t               *c;
-    ngx_http_health_check_t        *check;
-    ngx_http_health_check_probe_t  *probe;
+    int                   err;
+    socklen_t             len;
+    ngx_int_t             rc;
+    ngx_uint_t            failed;
+    ngx_connection_t     *c;
+    ngx_http_hc_t        *check;
+    ngx_http_hc_probe_t  *probe;
 
     c = ev->data;
     probe = c->data;
     check = probe->check;
 
     if (ev->timedout) {
-        ngx_http_health_check_finish(probe, (u_char *)
-                                     "timed out connecting");
+        ngx_http_hc_finish(probe, (u_char *) "timed out connecting");
         return;
     }
 
@@ -430,13 +422,12 @@ ngx_http_health_check_ssl_init(ngx_event_t *ev)
     }
 
     if (failed) {
-        ngx_http_health_check_finish(probe, (u_char *) "connect() failed");
+        ngx_http_hc_finish(probe, (u_char *) "connect() failed");
         return;
     }
 
     if (ngx_ssl_create_connection(check->ssl, c, NGX_SSL_CLIENT) != NGX_OK) {
-        ngx_http_health_check_abort(probe,
-                               (u_char *) "cannot create an SSL connection");
+        ngx_http_hc_abort(probe, (u_char *) "cannot create an SSL connection");
         return;
     }
 
@@ -450,8 +441,7 @@ ngx_http_health_check_ssl_init(ngx_event_t *ev)
         ngx_ssl_error(NGX_LOG_ERR, c->log, 0,
                       "SSL_set_tlsext_host_name(\"%s\") failed",
                       check->ssl_server_name);
-        ngx_http_health_check_abort(probe,
-                                    (u_char *) "cannot set the SSL server name");
+        ngx_http_hc_abort(probe, (u_char *) "cannot set the SSL server name");
         return;
     }
 
@@ -461,31 +451,31 @@ ngx_http_health_check_ssl_init(ngx_event_t *ev)
 
     if (rc == NGX_AGAIN) {
         /* the connect timer is still set: it bounds the handshake */
-        c->ssl->handler = ngx_http_health_check_ssl_handshaked;
+        c->ssl->handler = ngx_http_hc_ssl_handshaked;
         return;
     }
 
-    ngx_http_health_check_ssl_handshaked(c);
+    ngx_http_hc_ssl_handshaked(c);
 }
 
 
 /* The handshake is over, or failed: checks the certificate, then sends. */
 
 static void
-ngx_http_health_check_ssl_handshaked(ngx_connection_t *c)
+ngx_http_hc_ssl_handshaked(ngx_connection_t *c)
 {
-    long                            rc;
-    u_char                         *p, *last;
-    ngx_http_health_check_t        *check;
-    ngx_http_health_check_probe_t  *probe;
+    long                  rc;
+    u_char               *p, *last;
+    ngx_http_hc_t        *check;
+    ngx_http_hc_probe_t  *probe;
 
     probe = c->data;
     check = probe->check;
 
     if (!c->ssl->handshaked) {
-        ngx_http_health_check_finish(probe, c->write->timedout
-                                     ? (u_char *) "timed out in SSL handshake"
-                                     : (u_char *) "SSL handshake failed");
+        ngx_http_hc_finish(probe, c->write->timedout
+                           ? (u_char *) "timed out in SSL handshake"
+                           : (u_char *) "SSL handshake failed");
         return;
     }
 
@@ -495,7 +485,7 @@ ngx_http_health_check_ssl_handshaked(ngx_connection_t *c)
         if (rc != X509_V_OK) {
             p = ngx_pnalloc(probe->pool, NGX_MAX_ERROR_STR);
             if (p == NULL) {
-                ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+                ngx_http_hc_abort(probe, (u_char *) "out of memory");
                 return;
             }
 
@@ -504,14 +494,14 @@ ngx_http_health_check_ssl_handshaked(ngx_connection_t *c)
                                 rc, X509_verify_cert_error_string(rc));
             *last = '\0';
 
-            ngx_http_health_check_finish(probe, p);
+            ngx_http_hc_finish(probe, p);
             return;
         }
 
         if (ngx_ssl_check_host(c, &check->ssl_name) != NGX_OK) {
             p = ngx_pnalloc(probe->pool, NGX_MAX_ERROR_STR);
             if (p == NULL) {
-                ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+                ngx_http_hc_abort(probe, (u_char *) "out of memory");
                 return;
             }
 
@@ -520,36 +510,36 @@ ngx_http_health_check_ssl_handshaked(ngx_connection_t *c)
                                 &check->ssl_name);
             *last = '\0';
 
-            ngx_http_health_check_finish(probe, p);
+            ngx_http_hc_finish(probe, p);
             return;
         }
     }
 
-    c->read->handler = ngx_http_health_check_recv;
-    c->write->handler = ngx_http_health_check_send;
+    c->read->handler = ngx_http_hc_recv;
+    c->write->handler = ngx_http_hc_send;
 
-    ngx_http_health_check_send(c->write);
+    ngx_http_hc_send(c->write);
 }
 
 #endif
 
 
 static void
-ngx_http_health_check_send(ngx_event_t *wev)
+ngx_http_hc_send(ngx_event_t *wev)
 {
-    ssize_t                         n;
-    u_char                         *last;
-    ngx_connection_t               *c;
-    ngx_http_health_check_t        *check;
-    ngx_http_health_check_probe_t  *probe;
+    ssize_t               n;
+    u_char               *last;
+    ngx_connection_t     *c;
+    ngx_http_hc_t        *check;
+    ngx_http_hc_probe_t  *probe;
 
     c = wev->data;
     probe = c->data;
     check = probe->check;
 
     if (wev->timedout) {
-        ngx_http_health_check_finish(probe, (u_char *)
-                                     "timed out connecting or sending");
+        ngx_http_hc_finish(probe, (u_char *)
+                           "timed out connecting or sending");
         return;
     }
 
@@ -559,8 +549,7 @@ ngx_http_health_check_send(ngx_event_t *wev)
         n = c->send(c, probe->sent, last - probe->sent);
 
         if (n == NGX_ERROR) {
-            ngx_http_health_check_finish(probe, (u_char *)
-                                         "connect() or send() failed");
+            ngx_http_hc_finish(probe, (u_char *) "connect() or send() failed");
             return;
         }
 
@@ -570,8 +559,7 @@ ngx_http_health_check_send(ngx_event_t *wev)
             }
 
             if (ngx_handle_write_event(wev, 0) != NGX_OK) {
-                ngx_http_health_check_abort(probe,
-                                       (u_char *) "cannot wait to send");
+                ngx_http_hc_abort(probe, (u_char *) "cannot wait to send");
             }
 
             return;
@@ -584,52 +572,51 @@ ngx_http_health_check_send(ngx_event_t *wev)
         ngx_del_timer(wev);
     }
 
-    wev->handler = ngx_http_health_check_dummy;
+    wev->handler = ngx_http_hc_dummy;
 
     ngx_add_timer(c->read, check->read_timeout);
 
     if (c->read->ready) {
-        ngx_http_health_check_recv(c->read);
+        ngx_http_hc_recv(c->read);
         return;
     }
 
     if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
-        ngx_http_health_check_abort(probe, (u_char *) "cannot wait to read");
+        ngx_http_hc_abort(probe, (u_char *) "cannot wait to read");
     }
 }
 
 
 static void
-ngx_http_health_check_recv(ngx_event_t *rev)
+ngx_http_hc_recv(ngx_event_t *rev)
 {
-    u_char                         *p;
-    size_t                          size, body;
-    ssize_t                         n;
-    ngx_buf_t                      *b;
-    ngx_int_t                       rc;
-    ngx_connection_t               *c;
-    ngx_http_health_check_probe_t  *probe;
+    u_char               *p;
+    size_t                size, body;
+    ssize_t               n;
+    ngx_buf_t            *b;
+    ngx_int_t             rc;
+    ngx_connection_t     *c;
+    ngx_http_hc_probe_t  *probe;
 
     c = rev->data;
     probe = c->data;
     b = &probe->buf;
 
     if (rev->timedout) {
-        ngx_http_health_check_finish(probe,
-                                     (u_char *) "timed out reading response");
+        ngx_http_hc_finish(probe, (u_char *) "timed out reading response");
         return;
     }
 
     if (b->start == NULL) {
-        b->start = ngx_palloc(probe->pool, NGX_HTTP_HEALTH_CHECK_BUF_INIT);
+        b->start = ngx_palloc(probe->pool, NGX_HTTP_HC_BUF_INIT);
         if (b->start == NULL) {
-            ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+            ngx_http_hc_abort(probe, (u_char *) "out of memory");
             return;
         }
 
         b->pos = b->start;
         b->last = b->start;
-        b->end = b->start + NGX_HTTP_HEALTH_CHECK_BUF_INIT;
+        b->end = b->start + NGX_HTTP_HC_BUF_INIT;
     }
 
     for ( ;; ) {
@@ -637,20 +624,20 @@ ngx_http_health_check_recv(ngx_event_t *rev)
         if (b->last == b->end) {
             size = b->end - b->start;
 
-            if (size >= NGX_HTTP_HEALTH_CHECK_BUF_MAX) {
+            if (size >= NGX_HTTP_HC_BUF_MAX) {
                 /*
                  * Only the first 256k of the body are examined. The header
                  * is at most 32k, so the buffer holds at least that much.
                  */
-                ngx_http_health_check_evaluate(probe);
+                ngx_http_hc_evaluate(probe);
                 return;
             }
 
-            size = ngx_min(size * 2, NGX_HTTP_HEALTH_CHECK_BUF_MAX);
+            size = ngx_min(size * 2, NGX_HTTP_HC_BUF_MAX);
 
             p = ngx_palloc(probe->pool, size);
             if (p == NULL) {
-                ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+                ngx_http_hc_abort(probe, (u_char *) "out of memory");
                 return;
             }
 
@@ -664,8 +651,7 @@ ngx_http_health_check_recv(ngx_event_t *rev)
 
         if (n == NGX_AGAIN) {
             if (ngx_handle_read_event(rev, 0) != NGX_OK) {
-                ngx_http_health_check_abort(probe,
-                                            (u_char *) "cannot wait to read");
+                ngx_http_hc_abort(probe, (u_char *) "cannot wait to read");
             }
             return;
         }
@@ -675,7 +661,7 @@ ngx_http_health_check_recv(ngx_event_t *rev)
              * A failed non-blocking connect() can be reported on the read
              * event before the write event has run: nothing was sent yet.
              */
-            ngx_http_health_check_finish(probe,
+            ngx_http_hc_finish(probe,
                 probe->sent == probe->check->request.data
                 ? (u_char *) "connect() failed" : (u_char *) "recv() failed");
             return;
@@ -683,7 +669,7 @@ ngx_http_health_check_recv(ngx_event_t *rev)
 
         if (n == 0) {
             /* evaluate() rejects a body shorter than its Content-Length */
-            ngx_http_health_check_evaluate(probe);
+            ngx_http_hc_evaluate(probe);
             return;
         }
 
@@ -696,23 +682,23 @@ ngx_http_health_check_recv(ngx_event_t *rev)
          * server closes the connection.
          */
 
-        rc = ngx_http_health_check_parse(probe, 0);
+        rc = ngx_http_hc_parse(probe, 0);
 
         if (rc == NGX_ERROR) {
-            ngx_http_health_check_finish(probe, probe->error);
+            ngx_http_hc_finish(probe, probe->error);
             return;
         }
 
         if (rc == NGX_OK && probe->chunked && !probe->bodyless) {
-            rc = ngx_http_health_check_dechunk(probe, NULL, &body);
+            rc = ngx_http_hc_dechunk(probe, NULL, &body);
 
             if (rc == NGX_ERROR) {
-                ngx_http_health_check_finish(probe, probe->error);
+                ngx_http_hc_finish(probe, probe->error);
                 return;
             }
 
             if (rc == NGX_OK) {
-                ngx_http_health_check_evaluate(probe);
+                ngx_http_hc_evaluate(probe);
                 return;
             }
 
@@ -726,9 +712,9 @@ ngx_http_health_check_recv(ngx_event_t *rev)
                 || (probe->content_length >= 0
                     && (off_t) body
                        >= ngx_min(probe->content_length,
-                                  NGX_HTTP_HEALTH_CHECK_BODY_MAX)))
+                                  NGX_HTTP_HC_BODY_MAX)))
             {
-                ngx_http_health_check_evaluate(probe);
+                ngx_http_hc_evaluate(probe);
                 return;
             }
         }
@@ -737,7 +723,7 @@ ngx_http_health_check_recv(ngx_event_t *rev)
 
 
 static void
-ngx_http_health_check_dummy(ngx_event_t *ev)
+ngx_http_hc_dummy(ngx_event_t *ev)
 {
 }
 
@@ -760,14 +746,13 @@ ngx_http_health_check_dummy(ngx_event_t *ev)
  */
 
 static ngx_int_t
-ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
-    ngx_uint_t store)
+ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
 {
-    off_t                            len;
-    u_char                          *p, *q, *line, *end, *nl, *colon, *v;
-    ngx_buf_t                       *b;
-    ngx_uint_t                       first;
-    ngx_http_health_check_header_t  *h;
+    off_t                  len;
+    u_char                *p, *q, *line, *end, *nl, *colon, *v;
+    ngx_buf_t             *b;
+    ngx_uint_t             first;
+    ngx_http_hc_header_t  *h;
 
     b = &probe->buf;
     p = b->start;
@@ -780,7 +765,7 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
 
     if (store) {
         probe->headers = ngx_array_create(probe->pool, 8,
-                                    sizeof(ngx_http_health_check_header_t));
+                                    sizeof(ngx_http_hc_header_t));
         if (probe->headers == NULL) {
             return NGX_ABORT;
         }
@@ -799,7 +784,7 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
 
         if (nl == NULL) {
             if ((size_t) (b->last - b->start)
-                >= NGX_HTTP_HEALTH_CHECK_HEADER_MAX)
+                >= NGX_HTTP_HC_HEADER_MAX)
             {
                 goto too_large;
             }
@@ -807,7 +792,7 @@ ngx_http_health_check_parse(ngx_http_health_check_probe_t *probe,
             return NGX_AGAIN;
         }
 
-        if ((size_t) (nl + 1 - b->start) > NGX_HTTP_HEALTH_CHECK_HEADER_MAX) {
+        if ((size_t) (nl + 1 - b->start) > NGX_HTTP_HC_HEADER_MAX) {
             goto too_large;
         }
 
@@ -941,16 +926,15 @@ too_large:
 /*
  * Decodes the chunked body that follows the header (RFC 9112, 7.1). NGX_OK
  * once the last chunk and the trailer section have arrived, or once
- * NGX_HTTP_HEALTH_CHECK_BODY_MAX bytes of data have; NGX_AGAIN until then;
+ * NGX_HTTP_HC_BODY_MAX bytes of data have; NGX_AGAIN until then;
  * NGX_ERROR (with probe->error) if the body is invalid. Sets *len to the
- * bytes of data decoded, at most NGX_HTTP_HEALTH_CHECK_BODY_MAX, and copies
+ * bytes of data decoded, at most NGX_HTTP_HC_BODY_MAX, and copies
  * them to "out" unless it's NULL. Chunk extensions and trailer fields are
  * skipped.
  */
 
 static ngx_int_t
-ngx_http_health_check_dechunk(ngx_http_health_check_probe_t *probe,
-    u_char *out, size_t *len)
+ngx_http_hc_dechunk(ngx_http_hc_probe_t *probe, u_char *out, size_t *len)
 {
     off_t       size;
     size_t      n, total;
@@ -1016,7 +1000,7 @@ ngx_http_health_check_dechunk(ngx_http_health_check_probe_t *probe,
         /* chunk-data */
 
         n = (size_t) ngx_min(size, last - p);
-        n = ngx_min(n, NGX_HTTP_HEALTH_CHECK_BODY_MAX - total);
+        n = ngx_min(n, NGX_HTTP_HC_BODY_MAX - total);
 
         if (out) {
             ngx_memcpy(out + total, p, n);
@@ -1024,7 +1008,7 @@ ngx_http_health_check_dechunk(ngx_http_health_check_probe_t *probe,
 
         total += n;
 
-        if (total == NGX_HTTP_HEALTH_CHECK_BODY_MAX) {
+        if (total == NGX_HTTP_HC_BODY_MAX) {
             *len = total;
             return NGX_OK;
         }
@@ -1078,30 +1062,30 @@ again:
 /* The response is complete (or 256k of body): judge it. */
 
 static void
-ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
+ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
 {
     size_t      len;
     ngx_str_t   body;
     ngx_int_t   rc;
 
-    rc = ngx_http_health_check_parse(probe, 1);
+    rc = ngx_http_hc_parse(probe, 1);
 
     if (rc == NGX_ABORT) {
-        ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+        ngx_http_hc_abort(probe, (u_char *) "out of memory");
         return;
     }
 
     if (rc == NGX_AGAIN) {
-        ngx_http_health_check_finish(probe,
-                                     probe->buf.last == probe->buf.start
-                                     ? (u_char *) "connection closed "
-                                                  "without a response"
-                                     : (u_char *) "incomplete response header");
+        ngx_http_hc_finish(probe,
+                           probe->buf.last == probe->buf.start
+                           ? (u_char *) "connection closed "
+                                        "without a response"
+                           : (u_char *) "incomplete response header");
         return;
     }
 
     if (rc == NGX_ERROR) {
-        ngx_http_health_check_finish(probe, probe->error);
+        ngx_http_hc_finish(probe, probe->error);
         return;
     }
 
@@ -1114,16 +1098,16 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
     } else if (probe->chunked) {
 
         body.data = ngx_pnalloc(probe->pool,
-                                ngx_min(len, NGX_HTTP_HEALTH_CHECK_BODY_MAX));
+                                ngx_min(len, NGX_HTTP_HC_BODY_MAX));
         if (body.data == NULL) {
-            ngx_http_health_check_abort(probe, (u_char *) "out of memory");
+            ngx_http_hc_abort(probe, (u_char *) "out of memory");
             return;
         }
 
-        rc = ngx_http_health_check_dechunk(probe, body.data, &len);
+        rc = ngx_http_hc_dechunk(probe, body.data, &len);
 
         if (rc == NGX_ERROR) {
-            ngx_http_health_check_finish(probe, probe->error);
+            ngx_http_hc_finish(probe, probe->error);
             return;
         }
 
@@ -1135,9 +1119,9 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
 
         if (rc == NGX_AGAIN
             && probe->buf.last - probe->buf.start
-               < NGX_HTTP_HEALTH_CHECK_BUF_MAX)
+               < NGX_HTTP_HC_BUF_MAX)
         {
-            ngx_http_health_check_finish(probe, (u_char *)
+            ngx_http_hc_finish(probe, (u_char *)
                   "connection closed before the response body was complete");
             return;
         }
@@ -1151,36 +1135,35 @@ ngx_http_health_check_evaluate(ngx_http_health_check_probe_t *probe)
         /* reading stops early only once enough of the body is here */
 
         if ((off_t) len < ngx_min(probe->content_length,
-                                  NGX_HTTP_HEALTH_CHECK_BODY_MAX))
+                                  NGX_HTTP_HC_BODY_MAX))
         {
-            ngx_http_health_check_finish(probe, (u_char *)
+            ngx_http_hc_finish(probe, (u_char *)
                   "connection closed before the response body was complete");
             return;
         }
     }
 
-    body.len = ngx_min(len, NGX_HTTP_HEALTH_CHECK_BODY_MAX);
+    body.len = ngx_min(len, NGX_HTTP_HC_BODY_MAX);
 
-    ngx_http_health_check_finish(probe,
-        ngx_http_health_check_match_response(probe->check->match, probe->pool,
-                                             probe->status, probe->headers,
-                                             &body));
+    ngx_http_hc_finish(probe,
+        ngx_http_hc_match_response(probe->check->match, probe->pool,
+                                   probe->status, probe->headers,
+                                   &body));
 }
 
 
 /* Records the result (reason == NULL: passed) and frees the probe. */
 
 static void
-ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
-    u_char *reason)
+ngx_http_hc_finish(ngx_http_hc_probe_t *probe, u_char *reason)
 {
-    uint64_t                           bit;
-    ngx_uint_t                         i, was, now;
-    ngx_http_upstream_rr_peer_t       *peer;
-    ngx_http_upstream_rr_peers_t      *peers;
-    ngx_http_health_check_t           *check;
-    ngx_http_health_check_peer_t      *st;
-    ngx_http_health_check_upstream_t  *up;
+    uint64_t                       bit;
+    ngx_uint_t                     i, was, now;
+    ngx_http_upstream_rr_peer_t   *peer;
+    ngx_http_upstream_rr_peers_t  *peers;
+    ngx_http_hc_t                 *check;
+    ngx_http_hc_peer_t            *st;
+    ngx_http_hc_upstream_t        *up;
 
     check = probe->check;
     up = check->upstream;
@@ -1236,7 +1219,7 @@ ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
                                  probe->sockaddr, probe->socklen, 1)
                 != NGX_OK
                 || peer->down == now
-                || ngx_http_health_check_admin_down(up, peer))
+                || ngx_http_hc_admin_down(up, peer))
             {
                 continue;
             }
@@ -1275,7 +1258,7 @@ ngx_http_health_check_finish(ngx_http_health_check_probe_t *probe,
 
 done:
 
-    ngx_http_health_check_close(probe);
+    ngx_http_hc_close(probe);
 }
 
 
@@ -1286,10 +1269,9 @@ done:
  */
 
 static void
-ngx_http_health_check_abort(ngx_http_health_check_probe_t *probe,
-    u_char *reason)
+ngx_http_hc_abort(ngx_http_hc_probe_t *probe, u_char *reason)
 {
-    ngx_http_health_check_t  *check;
+    ngx_http_hc_t  *check;
 
     check = probe->check;
 
@@ -1299,16 +1281,16 @@ ngx_http_health_check_abort(ngx_http_health_check_probe_t *probe,
                   &probe->name, &check->upstream->uscf->host, reason,
                   &check->file, check->line);
 
-    ngx_http_health_check_close(probe);
+    ngx_http_hc_close(probe);
 }
 
 
 /* Frees the probe, starts waiting ones, and schedules the next round. */
 
 static void
-ngx_http_health_check_close(ngx_http_health_check_probe_t *probe)
+ngx_http_hc_close(ngx_http_hc_probe_t *probe)
 {
-    ngx_http_health_check_t  *check;
+    ngx_http_hc_t  *check;
 
     check = probe->check;
 
@@ -1329,7 +1311,7 @@ ngx_http_health_check_close(ngx_http_health_check_probe_t *probe)
     }
 
     if (probe->started) {
-        ngx_http_health_check_active--;
+        ngx_http_hc_active--;
     }
 
     ngx_destroy_pool(probe->pool);
@@ -1339,5 +1321,5 @@ ngx_http_health_check_close(ngx_http_health_check_probe_t *probe)
         ngx_add_timer(&check->timer, check->interval);
     }
 
-    ngx_http_health_check_start();
+    ngx_http_hc_start();
 }

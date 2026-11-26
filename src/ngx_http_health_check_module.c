@@ -31,35 +31,34 @@
 #include <ngx_http_proxy_module.h>
 
 
-#define NGX_HTTP_HEALTH_CHECK_MAX_CHECKS  64    /* per group: failing bits */
+#define NGX_HTTP_HC_MAX_CHECKS  64    /* per group: failing bits */
 
 
-static void *ngx_http_health_check_create_main_conf(ngx_conf_t *cf);
-static char *ngx_http_health_check(ngx_conf_t *cf, ngx_command_t *cmd,
+static void *ngx_http_hc_create_main_conf(ngx_conf_t *cf);
+static char *ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
-static ngx_http_health_check_upstream_t *ngx_http_health_check_get_upstream(
-    ngx_conf_t *cf, ngx_http_health_check_main_conf_t *hmcf,
-    ngx_http_upstream_srv_conf_t *uscf);
-static ngx_int_t ngx_http_health_check_postconf(ngx_conf_t *cf);
+static ngx_http_hc_upstream_t *ngx_http_hc_get_upstream(ngx_conf_t *cf,
+    ngx_http_hc_main_conf_t *hmcf, ngx_http_upstream_srv_conf_t *uscf);
+static ngx_int_t ngx_http_hc_postconf(ngx_conf_t *cf);
 #if (NGX_HTTP_SSL)
-static ngx_int_t ngx_http_health_check_ssl(ngx_conf_t *cf,
-    ngx_http_health_check_t *check, ngx_http_proxy_loc_conf_t *plcf);
+static ngx_int_t ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
+    ngx_http_proxy_loc_conf_t *plcf);
 #endif
-static ngx_int_t ngx_http_health_check_init_process(ngx_cycle_t *cycle);
+static ngx_int_t ngx_http_hc_init_process(ngx_cycle_t *cycle);
 
 
-static ngx_command_t  ngx_http_health_check_commands[] = {
+static ngx_command_t  ngx_http_hc_commands[] = {
 
     { ngx_string("health_check"),
       NGX_HTTP_LOC_CONF|NGX_CONF_ANY,
-      ngx_http_health_check,
+      ngx_http_hc_health_check,
       NGX_HTTP_MAIN_CONF_OFFSET,
       0,
       NULL },
 
     { ngx_string("match"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_TAKE1,
-      ngx_http_health_check_match_block,
+      ngx_http_hc_match_block,
       NGX_HTTP_MAIN_CONF_OFFSET,
       0,
       NULL },
@@ -68,11 +67,11 @@ static ngx_command_t  ngx_http_health_check_commands[] = {
 };
 
 
-static ngx_http_module_t  ngx_http_health_check_module_ctx = {
+static ngx_http_module_t  ngx_http_hc_module_ctx = {
     NULL,                                  /* preconfiguration */
-    ngx_http_health_check_postconf,        /* postconfiguration */
+    ngx_http_hc_postconf,                  /* postconfiguration */
 
-    ngx_http_health_check_create_main_conf, /* create main configuration */
+    ngx_http_hc_create_main_conf,          /* create main configuration */
     NULL,                                  /* init main configuration */
 
     NULL,                                  /* create server configuration */
@@ -85,12 +84,12 @@ static ngx_http_module_t  ngx_http_health_check_module_ctx = {
 
 ngx_module_t  ngx_http_health_check_module = {
     NGX_MODULE_V1,
-    &ngx_http_health_check_module_ctx,     /* module context */
-    ngx_http_health_check_commands,        /* module directives */
+    &ngx_http_hc_module_ctx,               /* module context */
+    ngx_http_hc_commands,                  /* module directives */
     NGX_HTTP_MODULE,                       /* module type */
     NULL,                                  /* init master */
     NULL,                                  /* init module */
-    ngx_http_health_check_init_process,    /* init process */
+    ngx_http_hc_init_process,              /* init process */
     NULL,                                  /* init thread */
     NULL,                                  /* exit thread */
     NULL,                                  /* exit process */
@@ -100,7 +99,7 @@ ngx_module_t  ngx_http_health_check_module = {
 
 
 /* health_check parameters that are recognized but not implemented. */
-static ngx_str_t  ngx_http_health_check_unsupported[] = {
+static ngx_str_t  ngx_http_hc_unsupported[] = {
     ngx_string("jitter="),
     ngx_string("fails="),
     ngx_string("passes="),
@@ -116,23 +115,23 @@ static ngx_str_t  ngx_http_health_check_unsupported[] = {
 
 
 static void *
-ngx_http_health_check_create_main_conf(ngx_conf_t *cf)
+ngx_http_hc_create_main_conf(ngx_conf_t *cf)
 {
-    ngx_http_health_check_main_conf_t  *hmcf;
+    ngx_http_hc_main_conf_t  *hmcf;
 
-    hmcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_health_check_main_conf_t));
+    hmcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_hc_main_conf_t));
     if (hmcf == NULL) {
         return NULL;
     }
 
     if (ngx_array_init(&hmcf->matches, cf->pool, 4,
-                       sizeof(ngx_http_health_check_match_t))
+                       sizeof(ngx_http_hc_match_t))
         != NGX_OK
         || ngx_array_init(&hmcf->checks, cf->pool, 4,
-                          sizeof(ngx_http_health_check_t *))
+                          sizeof(ngx_http_hc_t *))
            != NGX_OK
         || ngx_array_init(&hmcf->upstreams, cf->pool, 4,
-                          sizeof(ngx_http_health_check_upstream_t *))
+                          sizeof(ngx_http_hc_upstream_t *))
            != NGX_OK)
     {
         return NULL;
@@ -145,18 +144,18 @@ ngx_http_health_check_create_main_conf(ngx_conf_t *cf)
 /* health_check [interval=time] [uri=uri] [match=name]; */
 
 static char *
-ngx_http_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_health_check_main_conf_t *hmcf = conf;
+    ngx_http_hc_main_conf_t *hmcf = conf;
 
-    u_char                    *p;
-    ngx_str_t                 *value, s, *u;
-    ngx_int_t                  ms;
-    ngx_uint_t                 i;
-    ngx_http_conf_ctx_t       *ctx;
-    ngx_http_health_check_t   *check, **cp;
+    u_char               *p;
+    ngx_str_t            *value, s, *u;
+    ngx_int_t             ms;
+    ngx_uint_t            i;
+    ngx_http_conf_ctx_t  *ctx;
+    ngx_http_hc_t        *check, **cp;
 
-    check = ngx_pcalloc(cf->pool, sizeof(ngx_http_health_check_t));
+    check = ngx_pcalloc(cf->pool, sizeof(ngx_http_hc_t));
     if (check == NULL) {
         return NGX_CONF_ERROR;
     }
@@ -223,7 +222,7 @@ ngx_http_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             continue;
         }
 
-        for (u = ngx_http_health_check_unsupported; u->len; u++) {
+        for (u = ngx_http_hc_unsupported; u->len; u++) {
             if (value[i].len >= u->len
                 && ngx_strncmp(value[i].data, u->data, u->len) == 0
                 && (u->data[u->len - 1] == '=' || value[i].len == u->len))
@@ -257,13 +256,13 @@ invalid:
 }
 
 
-static ngx_http_health_check_upstream_t *
-ngx_http_health_check_get_upstream(ngx_conf_t *cf,
-    ngx_http_health_check_main_conf_t *hmcf, ngx_http_upstream_srv_conf_t *uscf)
+static ngx_http_hc_upstream_t *
+ngx_http_hc_get_upstream(ngx_conf_t *cf, ngx_http_hc_main_conf_t *hmcf,
+    ngx_http_upstream_srv_conf_t *uscf)
 {
-    ngx_uint_t                          i;
-    ngx_http_upstream_server_t         *server, **sp;
-    ngx_http_health_check_upstream_t   *up, **upp;
+    ngx_uint_t                   i;
+    ngx_http_upstream_server_t  *server, **sp;
+    ngx_http_hc_upstream_t      *up, **upp;
 
     upp = hmcf->upstreams.elts;
     for (i = 0; i < hmcf->upstreams.nelts; i++) {
@@ -272,7 +271,7 @@ ngx_http_health_check_get_upstream(ngx_conf_t *cf,
         }
     }
 
-    up = ngx_pcalloc(cf->pool, sizeof(ngx_http_health_check_upstream_t));
+    up = ngx_pcalloc(cf->pool, sizeof(ngx_http_hc_upstream_t));
     if (up == NULL) {
         return NULL;
     }
@@ -321,18 +320,18 @@ ngx_http_health_check_get_upstream(ngx_conf_t *cf,
  */
 
 static ngx_int_t
-ngx_http_health_check_postconf(ngx_conf_t *cf)
+ngx_http_hc_postconf(ngx_conf_t *cf)
 {
-    u_char                              *p;
-    size_t                               len;
-    ngx_str_t                           *host;
-    ngx_uint_t                           i;
-    ngx_http_upstream_conf_t            *ucf;
-    ngx_http_proxy_loc_conf_t           *plcf;
-    ngx_http_upstream_srv_conf_t        *uscf;
-    ngx_http_health_check_t             *check, **checks;
-    ngx_http_health_check_upstream_t    *up;
-    ngx_http_health_check_main_conf_t   *hmcf;
+    u_char                        *p;
+    size_t                         len;
+    ngx_str_t                     *host;
+    ngx_uint_t                     i;
+    ngx_http_upstream_conf_t      *ucf;
+    ngx_http_proxy_loc_conf_t     *plcf;
+    ngx_http_upstream_srv_conf_t  *uscf;
+    ngx_http_hc_t                 *check, **checks;
+    ngx_http_hc_upstream_t        *up;
+    ngx_http_hc_main_conf_t       *hmcf;
 
     hmcf = ngx_http_conf_get_module_main_conf(cf,
                                               ngx_http_health_check_module);
@@ -356,7 +355,7 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
 
 #if (NGX_HTTP_SSL)
         if (plcf->ssl
-            && ngx_http_health_check_ssl(cf, check, plcf) != NGX_OK)
+            && ngx_http_hc_ssl_conf(cf, check, plcf) != NGX_OK)
         {
             return NGX_ERROR;
         }
@@ -380,8 +379,8 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
         }
 
         if (check->match_name.len) {
-            check->match = ngx_http_health_check_match_find(&hmcf->matches,
-                                                           &check->match_name);
+            check->match = ngx_http_hc_match_find(&hmcf->matches,
+                                                  &check->match_name);
             if (check->match == NULL) {
                 ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                               "match \"%V\" not found in %V:%ui",
@@ -390,12 +389,12 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
             }
         }
 
-        up = ngx_http_health_check_get_upstream(cf, hmcf, uscf);
+        up = ngx_http_hc_get_upstream(cf, hmcf, uscf);
         if (up == NULL) {
             return NGX_ERROR;
         }
 
-        if (up->nchecks == NGX_HTTP_HEALTH_CHECK_MAX_CHECKS) {
+        if (up->nchecks == NGX_HTTP_HC_MAX_CHECKS) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "too many health checks for upstream \"%V\" "
                           "in %V:%ui", &uscf->host, &check->file, check->line);
@@ -451,7 +450,7 @@ ngx_http_health_check_postconf(ngx_conf_t *cf)
  */
 
 static ngx_int_t
-ngx_http_health_check_ssl(ngx_conf_t *cf, ngx_http_health_check_t *check,
+ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
     ngx_http_proxy_loc_conf_t *plcf)
 {
     u_char                    *p, *last;
@@ -539,12 +538,12 @@ ngx_http_health_check_ssl(ngx_conf_t *cf, ngx_http_health_check_t *check,
 /* Checks run in worker 0 only. */
 
 static ngx_int_t
-ngx_http_health_check_init_process(ngx_cycle_t *cycle)
+ngx_http_hc_init_process(ngx_cycle_t *cycle)
 {
-    ngx_uint_t                           i;
-    ngx_http_health_check_t            **checks;
-    ngx_http_health_check_upstream_t   **ups;
-    ngx_http_health_check_main_conf_t   *hmcf;
+    ngx_uint_t                i;
+    ngx_http_hc_t           **checks;
+    ngx_http_hc_upstream_t  **ups;
+    ngx_http_hc_main_conf_t  *hmcf;
 
     if ((ngx_process != NGX_PROCESS_WORKER && ngx_process != NGX_PROCESS_SINGLE)
         || ngx_worker != 0)
@@ -558,12 +557,12 @@ ngx_http_health_check_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
-    ngx_http_health_check_probe_init(cycle);
+    ngx_http_hc_probe_init(cycle);
 
     ups = hmcf->upstreams.elts;
     for (i = 0; i < hmcf->upstreams.nelts; i++) {
         ups[i]->peers = ngx_array_create(cycle->pool, 4,
-                                         sizeof(ngx_http_health_check_peer_t));
+                                         sizeof(ngx_http_hc_peer_t));
         if (ups[i]->peers == NULL) {
             return NGX_ERROR;
         }
@@ -571,7 +570,7 @@ ngx_http_health_check_init_process(ngx_cycle_t *cycle)
 
     checks = hmcf->checks.elts;
     for (i = 0; i < hmcf->checks.nelts; i++) {
-        checks[i]->timer.handler = ngx_http_health_check_run;
+        checks[i]->timer.handler = ngx_http_hc_run;
         checks[i]->timer.data = checks[i];
         checks[i]->timer.log = cycle->log;
         checks[i]->timer.cancelable = 1;

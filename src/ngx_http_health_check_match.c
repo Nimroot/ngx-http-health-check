@@ -10,31 +10,28 @@
 #include "ngx_http_health_check.h"
 
 
-static char *ngx_http_health_check_match_test(ngx_conf_t *cf,
-    ngx_command_t *dummy, void *conf);
-static ngx_regex_t *ngx_http_health_check_regex(ngx_conf_t *cf,
-    ngx_str_t *pattern);
-static u_char *ngx_http_health_check_run_test(ngx_http_health_check_test_t *t,
-    ngx_pool_t *pool, ngx_uint_t status, ngx_array_t *headers,
-    ngx_str_t *body);
+static char *ngx_http_hc_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
+    void *conf);
+static ngx_regex_t *ngx_http_hc_regex(ngx_conf_t *cf, ngx_str_t *pattern);
+static u_char *ngx_http_hc_run_test(ngx_http_hc_test_t *t, ngx_pool_t *pool,
+    ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body);
 
 
 /* match name { ... } */
 
 char *
-ngx_http_health_check_match_block(ngx_conf_t *cf, ngx_command_t *cmd,
-    void *conf)
+ngx_http_hc_match_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_health_check_main_conf_t *hmcf = conf;
+    ngx_http_hc_main_conf_t *hmcf = conf;
 
-    char                           *rv;
-    ngx_str_t                      *value;
-    ngx_conf_t                      save;
-    ngx_http_health_check_match_t  *match;
+    char                 *rv;
+    ngx_str_t            *value;
+    ngx_conf_t            save;
+    ngx_http_hc_match_t  *match;
 
     value = cf->args->elts;
 
-    if (ngx_http_health_check_match_find(&hmcf->matches, &value[1])) {
+    if (ngx_http_hc_match_find(&hmcf->matches, &value[1])) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "duplicate match \"%V\"", &value[1]);
         return NGX_CONF_ERROR;
@@ -48,14 +45,14 @@ ngx_http_health_check_match_block(ngx_conf_t *cf, ngx_command_t *cmd,
     match->name = value[1];
 
     if (ngx_array_init(&match->tests, cf->pool, 4,
-                       sizeof(ngx_http_health_check_test_t))
+                       sizeof(ngx_http_hc_test_t))
         != NGX_OK)
     {
         return NGX_CONF_ERROR;
     }
 
     save = *cf;
-    cf->handler = ngx_http_health_check_match_test;
+    cf->handler = ngx_http_hc_match_test;
     cf->handler_conf = (void *) match;
 
     rv = ngx_conf_parse(cf, NULL);
@@ -69,18 +66,17 @@ ngx_http_health_check_match_block(ngx_conf_t *cf, ngx_command_t *cmd,
 /* One line inside a match block: status, header or body. */
 
 static char *
-ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
-    void *conf)
+ngx_http_hc_match_test(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
 {
-    ngx_http_health_check_match_t *match = conf;
+    ngx_http_hc_match_t *match = conf;
 
-    u_char                         *p, *dash;
-    size_t                          len;
-    ngx_int_t                       low, high;
-    ngx_str_t                      *value, *op;
-    ngx_uint_t                      i, n;
-    ngx_http_health_check_test_t   *t;
-    ngx_http_health_check_range_t  *range;
+    u_char               *p, *dash;
+    size_t                len;
+    ngx_int_t             low, high;
+    ngx_str_t            *value, *op;
+    ngx_uint_t            i, n;
+    ngx_http_hc_test_t   *t;
+    ngx_http_hc_range_t  *range;
 
     value = cf->args->elts;
     n = cf->args->nelts;
@@ -90,7 +86,7 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
         return NGX_CONF_ERROR;
     }
 
-    ngx_memzero(t, sizeof(ngx_http_health_check_test_t));
+    ngx_memzero(t, sizeof(ngx_http_hc_test_t));
 
     /* keep the test as written, for log messages */
 
@@ -114,7 +110,7 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
     t->text.len = p - t->text.data;
 
     if (ngx_strcmp(value[0].data, "status") == 0) {
-        t->type = NGX_HTTP_HEALTH_CHECK_STATUS;
+        t->type = NGX_HTTP_HC_STATUS;
 
         i = 1;
         if (n > 1 && ngx_strcmp(value[1].data, "!") == 0) {
@@ -127,7 +123,7 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
         }
 
         t->ranges = ngx_array_create(cf->pool, n - i,
-                                     sizeof(ngx_http_health_check_range_t));
+                                     sizeof(ngx_http_hc_range_t));
         if (t->ranges == NULL) {
             return NGX_CONF_ERROR;
         }
@@ -163,16 +159,16 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
     }
 
     if (ngx_strcmp(value[0].data, "header") == 0) {
-        t->type = NGX_HTTP_HEALTH_CHECK_HEADER;
+        t->type = NGX_HTTP_HC_HEADER;
 
         if (n == 2 && ngx_strcmp(value[1].data, "!") != 0) {
-            t->op = NGX_HTTP_HEALTH_CHECK_HEADER_PRESENT;
+            t->op = NGX_HTTP_HC_HEADER_PRESENT;
             t->name = value[1];
             return NGX_CONF_OK;
         }
 
         if (n == 3 && ngx_strcmp(value[1].data, "!") == 0) {
-            t->op = NGX_HTTP_HEALTH_CHECK_HEADER_ABSENT;
+            t->op = NGX_HTTP_HC_HEADER_ABSENT;
             t->name = value[2];
             return NGX_CONF_OK;
         }
@@ -186,16 +182,16 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
         op = &value[2];
 
         if (ngx_strcmp(op->data, "=") == 0) {
-            t->op = NGX_HTTP_HEALTH_CHECK_HEADER_EQ;
+            t->op = NGX_HTTP_HC_HEADER_EQ;
 
         } else if (ngx_strcmp(op->data, "!=") == 0) {
-            t->op = NGX_HTTP_HEALTH_CHECK_HEADER_NE;
+            t->op = NGX_HTTP_HC_HEADER_NE;
 
         } else if (ngx_strcmp(op->data, "~") == 0) {
-            t->op = NGX_HTTP_HEALTH_CHECK_HEADER_RE;
+            t->op = NGX_HTTP_HC_HEADER_RE;
 
         } else if (ngx_strcmp(op->data, "!~") == 0) {
-            t->op = NGX_HTTP_HEALTH_CHECK_HEADER_NRE;
+            t->op = NGX_HTTP_HC_HEADER_NRE;
 
         } else {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -203,10 +199,10 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
             return NGX_CONF_ERROR;
         }
 
-        if (t->op == NGX_HTTP_HEALTH_CHECK_HEADER_RE
-            || t->op == NGX_HTTP_HEALTH_CHECK_HEADER_NRE)
+        if (t->op == NGX_HTTP_HC_HEADER_RE
+            || t->op == NGX_HTTP_HC_HEADER_NRE)
         {
-            t->regex = ngx_http_health_check_regex(cf, &value[3]);
+            t->regex = ngx_http_hc_regex(cf, &value[3]);
             if (t->regex == NULL) {
                 return NGX_CONF_ERROR;
             }
@@ -216,7 +212,7 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
     }
 
     if (ngx_strcmp(value[0].data, "body") == 0) {
-        t->type = NGX_HTTP_HEALTH_CHECK_BODY;
+        t->type = NGX_HTTP_HC_BODY;
 
         if (n != 3) {
             goto invalid_args;
@@ -232,7 +228,7 @@ ngx_http_health_check_match_test(ngx_conf_t *cf, ngx_command_t *dummy,
             return NGX_CONF_ERROR;
         }
 
-        t->regex = ngx_http_health_check_regex(cf, &value[2]);
+        t->regex = ngx_http_hc_regex(cf, &value[2]);
         if (t->regex == NULL) {
             return NGX_CONF_ERROR;
         }
@@ -261,7 +257,7 @@ invalid_args:
 
 
 static ngx_regex_t *
-ngx_http_health_check_regex(ngx_conf_t *cf, ngx_str_t *pattern)
+ngx_http_hc_regex(ngx_conf_t *cf, ngx_str_t *pattern)
 {
     u_char               errstr[NGX_MAX_CONF_ERRSTR];
     ngx_regex_compile_t  rc;
@@ -284,11 +280,11 @@ ngx_http_health_check_regex(ngx_conf_t *cf, ngx_str_t *pattern)
 
 /* The match block with this name in "matches", or NULL. */
 
-ngx_http_health_check_match_t *
-ngx_http_health_check_match_find(ngx_array_t *matches, ngx_str_t *name)
+ngx_http_hc_match_t *
+ngx_http_hc_match_find(ngx_array_t *matches, ngx_str_t *name)
 {
-    ngx_uint_t                      i;
-    ngx_http_health_check_match_t  *match;
+    ngx_uint_t            i;
+    ngx_http_hc_match_t  *match;
 
     match = matches->elts;
 
@@ -307,16 +303,16 @@ ngx_http_health_check_match_find(ngx_array_t *matches, ngx_str_t *name)
 /*
  * NULL if the response passes every test of "match" (without a match block:
  * if its status is 2xx or 3xx), otherwise why it failed. "headers" holds
- * ngx_http_health_check_header_t; the reason is allocated from "pool".
+ * ngx_http_hc_header_t; the reason is allocated from "pool".
  */
 
 u_char *
-ngx_http_health_check_match_response(ngx_http_health_check_match_t *match,
-    ngx_pool_t *pool, ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body)
+ngx_http_hc_match_response(ngx_http_hc_match_t *match, ngx_pool_t *pool,
+    ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body)
 {
-    u_char                        *reason;
-    ngx_uint_t                     i;
-    ngx_http_health_check_test_t  *t;
+    u_char              *reason;
+    ngx_uint_t           i;
+    ngx_http_hc_test_t  *t;
 
     if (match == NULL) {
         if (status >= 200 && status < 400) {
@@ -336,8 +332,7 @@ ngx_http_health_check_match_response(ngx_http_health_check_match_t *match,
     t = match->tests.elts;
 
     for (i = 0; i < match->tests.nelts; i++) {
-        reason = ngx_http_health_check_run_test(&t[i], pool, status, headers,
-                                                body);
+        reason = ngx_http_hc_run_test(&t[i], pool, status, headers, body);
         if (reason) {
             return reason;
         }
@@ -350,20 +345,20 @@ ngx_http_health_check_match_response(ngx_http_health_check_match_t *match,
 /* NULL if the response passes the test, otherwise why it failed. */
 
 static u_char *
-ngx_http_health_check_run_test(ngx_http_health_check_test_t *t,
-    ngx_pool_t *pool, ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body)
+ngx_http_hc_run_test(ngx_http_hc_test_t *t, ngx_pool_t *pool,
+    ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body)
 {
-    u_char                          *reason;
-    ngx_int_t                        rc;
-    ngx_uint_t                       i, found, pass;
-    ngx_http_health_check_range_t   *range;
-    ngx_http_health_check_header_t  *h;
+    u_char                *reason;
+    ngx_int_t              rc;
+    ngx_uint_t             i, found, pass;
+    ngx_http_hc_range_t   *range;
+    ngx_http_hc_header_t  *h;
 
     pass = 0;
 
     switch (t->type) {
 
-    case NGX_HTTP_HEALTH_CHECK_STATUS:
+    case NGX_HTTP_HC_STATUS:
         range = t->ranges->elts;
         found = 0;
 
@@ -377,7 +372,7 @@ ngx_http_health_check_run_test(ngx_http_health_check_test_t *t,
         pass = t->negate ? !found : found;
         break;
 
-    case NGX_HTTP_HEALTH_CHECK_HEADER:
+    case NGX_HTTP_HC_HEADER:
         h = headers->elts;
         found = 0;
 
@@ -393,39 +388,39 @@ ngx_http_health_check_run_test(ngx_http_health_check_test_t *t,
 
             switch (t->op) {
 
-            case NGX_HTTP_HEALTH_CHECK_HEADER_EQ:
-            case NGX_HTTP_HEALTH_CHECK_HEADER_NE:
+            case NGX_HTTP_HC_HEADER_EQ:
+            case NGX_HTTP_HC_HEADER_NE:
                 rc = (h[i].value.len == t->value.len
                       && ngx_strncmp(h[i].value.data, t->value.data,
                                      t->value.len) == 0);
-                if (rc == (t->op == NGX_HTTP_HEALTH_CHECK_HEADER_EQ)) {
+                if (rc == (t->op == NGX_HTTP_HC_HEADER_EQ)) {
                     pass = 1;
                 }
                 break;
 
-            case NGX_HTTP_HEALTH_CHECK_HEADER_RE:
-            case NGX_HTTP_HEALTH_CHECK_HEADER_NRE:
+            case NGX_HTTP_HC_HEADER_RE:
+            case NGX_HTTP_HC_HEADER_NRE:
                 rc = ngx_regex_exec(t->regex, &h[i].value, NULL, 0);
                 if (rc < NGX_REGEX_NO_MATCHED) {
                     break;
                 }
-                if ((rc >= 0) == (t->op == NGX_HTTP_HEALTH_CHECK_HEADER_RE)) {
+                if ((rc >= 0) == (t->op == NGX_HTTP_HC_HEADER_RE)) {
                     pass = 1;
                 }
                 break;
             }
         }
 
-        if (t->op == NGX_HTTP_HEALTH_CHECK_HEADER_PRESENT) {
+        if (t->op == NGX_HTTP_HC_HEADER_PRESENT) {
             pass = found;
 
-        } else if (t->op == NGX_HTTP_HEALTH_CHECK_HEADER_ABSENT) {
+        } else if (t->op == NGX_HTTP_HC_HEADER_ABSENT) {
             pass = !found;
         }
 
         break;
 
-    case NGX_HTTP_HEALTH_CHECK_BODY:
+    case NGX_HTTP_HC_BODY:
         rc = ngx_regex_exec(t->regex, body, NULL, 0);
         if (rc < NGX_REGEX_NO_MATCHED) {
             return (u_char *) "regex error in body test";
@@ -444,7 +439,7 @@ ngx_http_health_check_run_test(ngx_http_health_check_test_t *t,
         return (u_char *) "test failed";
     }
 
-    if (t->type == NGX_HTTP_HEALTH_CHECK_STATUS) {
+    if (t->type == NGX_HTTP_HC_STATUS) {
         ngx_sprintf(reason, "status %ui fails \"%V\"%Z", status, &t->text);
 
     } else {
