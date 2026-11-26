@@ -618,7 +618,15 @@ ngx_http_hc_send(ngx_event_t *wev)
         ngx_del_timer(wev);
     }
 
+    /* no more interest in writing, for poll and select */
+
     wev->handler = ngx_http_hc_dummy;
+
+    if (ngx_handle_write_event(wev, 0) != NGX_OK) {
+        ngx_http_hc_abort(probe, (u_char *) "cannot handle events");
+        return;
+    }
+
     c->read->handler = ngx_http_hc_recv;
 
     ngx_add_timer(c->read, check->conf->read_timeout);
