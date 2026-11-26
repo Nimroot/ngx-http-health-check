@@ -11,8 +11,9 @@ WAIT="${WAIT:-8}"      # seconds to wait for a state change (checks run every 1s
 C="ngx-health-check-test-$$"
 
 pass=0 fail=0
-ok()  { printf '  \e[32mPASS\e[0m %-56s %s\n' "$1" "$2"; ((pass++)); }
-bad() { printf '  \e[31mFAIL\e[0m %-56s %s\n' "$1" "$2"; ((fail++)); }
+ok()  { printf '  \e[32mPASS\e[0m %-60s %s\n' "$1" "$2"; ((pass++)); }
+bad() { printf '  \e[31mFAIL\e[0m %-60s %s\n' "$1" "$2"; ((fail++)); }
+is()  { [[ $2 == "$3" ]] && ok "$1" "$2" || bad "$1" "got '$2', want '$3'"; }
 
 # --init: nginx isn't process 1, which would reap (and log) the helpers'
 # orphans
@@ -55,18 +56,15 @@ expect() {
     done
 }
 
-# now NAME PATH WANT: checked once, no waiting (state that must NOT change)
+# now NAME PATH WANT: checked once (a state that must hold)
 now() {
-    local got; got=$(served "$2")
-    [[ $got == "$3" ]] && ok "$1" "$got" || bad "$1" "got $got, want $3"
+    is "$1" "$(served "$2")" "$3"
 }
 
 # attempts NAME PATH WANT: status and $upstream_status of a /flaky/ request,
 # e.g. "503 503, 503" = two attempts, both answered 503
 attempts() {
-    local got
-    got=$(curl -s -m 5 -o /dev/null -w '%{http_code} %header{x-upstream-status}' "$BASE$2")
-    [[ $got == "$3" ]] && ok "$1" "$got" || bad "$1" "got '$got', want '$3'"
+    is "$1" "$(curl -s -m 5 -o /dev/null -w '%{http_code} %header{x-upstream-status}' "$BASE$2")" "$3"
 }
 
 # logged NAME TEXT: TEXT appears in the log since $since (polled: the engine
@@ -181,9 +179,7 @@ echo "SRV: srv.test resolve down"
 expect "srv control: the SRV record resolves"  /srv-up/ 127.0.0.4
 sleep 3
 now    "srv: config-down SRV server stays down" /srv/ 9102
-got=$(cx "wc -l < /tmp/srv-health.log")
-[[ $got == 0 ]] && ok "srv: config-down SRV server not probed" "0 probes" \
-                || bad "srv: config-down SRV server not probed" "$got probes"
+is     "srv: config-down SRV server not probed" "$(cx "wc -l < /tmp/srv-health.log")" 0
 
 # --- response framing -------------------------------------------------------------
 # 127.0.0.1:9301 (socat) sends /tmp/raw/resp verbatim and closes. While it
@@ -323,11 +319,8 @@ $(for _ in {1..40}; do echo "        server 127.0.0.1:9101;"; done)
 EOF
 cx "nginx -c /tmp/m3/nginx.conf"
 sleep 4
-got=$(cx "wget -qO- http://127.0.0.1:18990/ 2>&1")
-[[ $got == 9101 ]] && ok "many: server still in use" "$got" || bad "many: server still in use" "got $got"
-got=$(cx "grep -c 'is unhealthy' /tmp/m3/error.log")
-[[ $got == 0 ]] && ok "many: no probe failed for lack of connections" "0 failures" \
-                || bad "many: no probe failed for lack of connections" "$got failures"
+is "many: server still in use" "$(cx "wget -qO- http://127.0.0.1:18990/ 2>&1")" 9101
+is "many: no probe failed for lack of connections" "$(cx "grep -c 'is unhealthy' /tmp/m3/error.log")" 0
 cx "nginx -c /tmp/m3/nginx.conf -s quit"
 
 # --- configuration errors ---------------------------------------------------------
