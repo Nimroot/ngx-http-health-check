@@ -41,8 +41,7 @@ static ngx_http_hc_upstream_t *ngx_http_hc_get_upstream(ngx_conf_t *cf,
     ngx_http_hc_main_conf_t *hmcf, ngx_http_upstream_srv_conf_t *uscf);
 static ngx_int_t ngx_http_hc_postconf(ngx_conf_t *cf);
 #if (NGX_HTTP_SSL)
-static ngx_int_t ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
-    ngx_http_proxy_loc_conf_t *plcf);
+static ngx_int_t ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *hc);
 #endif
 
 
@@ -301,36 +300,34 @@ ngx_http_hc_get_upstream(ngx_conf_t *cf, ngx_http_hc_main_conf_t *hmcf,
 
 
 /*
- * Runs once the whole http{} block is parsed (and merged): ties each
- * health_check to its location's upstream group and match block.
+ * Once the http block is parsed and merged: ties each health_check to its
+ * location's group, proxy settings and match block, and builds its request.
  */
 
 static ngx_int_t
 ngx_http_hc_postconf(ngx_conf_t *cf)
 {
-    u_char                        *p;
-    size_t                         len;
-    ngx_str_t                     *host;
-    ngx_uint_t                     i;
-    ngx_http_upstream_conf_t      *ucf;
-    ngx_http_proxy_loc_conf_t     *plcf;
-    ngx_http_upstream_srv_conf_t  *uscf;
-    ngx_http_hc_t                 *hc;
-    ngx_http_hc_upstream_t        *up;
-    ngx_http_hc_main_conf_t       *hmcf;
+    u_char                     *p;
+    size_t                      len;
+    ngx_str_t                  *host;
+    ngx_uint_t                  i;
+    ngx_http_hc_t              *hc;
+    ngx_http_hc_upstream_t     *up;
+    ngx_http_hc_main_conf_t    *hmcf;
+    ngx_http_proxy_loc_conf_t  *plcf;
 
     hmcf = ngx_http_conf_get_module_main_conf(cf,
                                               ngx_http_health_check_module);
-
     hc = hmcf->checks.elts;
 
     for (i = 0; i < hmcf->checks.nelts; i++) {
 
         plcf = hc[i].loc_conf[ngx_http_proxy_module.ctx_index];
-        ucf = &plcf->upstream;
-        uscf = ucf->upstream;
 
-        if (uscf == NULL) {
+        hc[i].conf = &plcf->upstream;
+        hc[i].uscf = plcf->upstream.upstream;
+
+        if (hc[i].uscf == NULL) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "\"health_check\" needs \"proxy_pass\" to an "
                           "upstream group (without variables) in the same "
@@ -338,34 +335,19 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
             return NGX_ERROR;
         }
 
-#if (NGX_HTTP_SSL)
-        if (plcf->ssl
-            && ngx_http_hc_ssl_conf(cf, &hc[i], plcf) != NGX_OK)
-        {
-            return NGX_ERROR;
-        }
-#elif (NGX_COMPAT)
-        if (plcf->ssl) {
-            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
-                          "\"health_check\" over https needs "
-                          "ngx_http_health_check_module built with "
-                          "--with-http_ssl_module in %V:%ui",
-                          &hc[i].file, hc[i].line);
-            return NGX_ERROR;
-        }
-#endif
-
-        if (uscf->shm_zone == NULL) {
+        if (hc[i].uscf->shm_zone == NULL) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "upstream \"%V\" must reside in shared memory "
                           "(add a \"zone\" directive) for \"health_check\" "
-                          "in %V:%ui", &uscf->host, &hc[i].file, hc[i].line);
+                          "in %V:%ui", &hc[i].uscf->host,
+                          &hc[i].file, hc[i].line);
             return NGX_ERROR;
         }
 
         if (hc[i].match_name.len) {
             hc[i].match = ngx_http_hc_match_find(&hmcf->matches,
                                                  &hc[i].match_name);
+
             if (hc[i].match == NULL) {
                 ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                               "match \"%V\" not found in %V:%ui",
@@ -374,7 +356,7 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
             }
         }
 
-        up = ngx_http_hc_get_upstream(cf, hmcf, uscf);
+        up = ngx_http_hc_get_upstream(cf, hmcf, hc[i].uscf);
         if (up == NULL) {
             return NGX_ERROR;
         }
@@ -382,23 +364,20 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
         if (up->nchecks == NGX_HTTP_HC_MAX_CHECKS) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "too many health checks for upstream \"%V\" "
-                          "in %V:%ui", &uscf->host, &hc[i].file, hc[i].line);
+                          "in %V:%ui", &hc[i].uscf->host,
+                          &hc[i].file, hc[i].line);
             return NGX_ERROR;
         }
 
         hc[i].upstream = up;
         hc[i].index = up->nchecks++;
 
-        hc[i].connect_timeout = ucf->connect_timeout;
-        hc[i].send_timeout = ucf->send_timeout;
-        hc[i].read_timeout = ucf->read_timeout;
-
         /*
          * Host is $proxy_host, the upstream group's name. HTTP/2 isn't
          * spoken by probes: with proxy_http_version 2 they use HTTP/1.1.
          */
 
-        host = &uscf->host;
+        host = &hc[i].uscf->host;
         hc[i].http11 = (plcf->http_version >= NGX_HTTP_VERSION_11);
 
         len = sizeof("GET ") - 1 + hc[i].uri.len
@@ -417,6 +396,21 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
                                         &hc[i].uri,
                                         hc[i].http11 ? '1' : '0', host)
                             - p;
+
+#if (NGX_HTTP_SSL)
+        if (plcf->ssl && ngx_http_hc_ssl_conf(cf, &hc[i]) != NGX_OK) {
+            return NGX_ERROR;
+        }
+#elif (NGX_COMPAT)
+        if (plcf->ssl) {
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                          "\"health_check\" over https needs "
+                          "ngx_http_health_check_module built with "
+                          "--with-http_ssl_module in %V:%ui",
+                          &hc[i].file, hc[i].line);
+            return NGX_ERROR;
+        }
+#endif
     }
 
     return NGX_OK;
@@ -435,45 +429,46 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
  */
 
 static ngx_int_t
-ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
-    ngx_http_proxy_loc_conf_t *plcf)
+ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *hc)
 {
     u_char                    *p, *last;
     ngx_str_t                  name;
-    ngx_http_upstream_conf_t  *ucf;
+    ngx_http_upstream_conf_t  *conf;
 
-    ucf = &plcf->upstream;
+    conf = hc->conf;
 
-    if (ucf->ssl == NULL || ucf->ssl->ctx == NULL) {
+    if (conf->ssl == NULL || conf->ssl->ctx == NULL) {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                       "no SSL context for \"health_check\" in %V:%ui",
-                      &check->file, check->line);
+                      &hc->file, hc->line);
         return NGX_ERROR;
     }
 
-    if (ucf->ssl_name && ucf->ssl_name->lengths) {
+    if (conf->ssl_name && conf->ssl_name->lengths) {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                       "\"health_check\" cannot use \"proxy_ssl_name\" "
-                      "with variables in %V:%ui", &check->file, check->line);
+                      "with variables in %V:%ui", &hc->file, hc->line);
         return NGX_ERROR;
     }
 
-    if (ucf->ssl_certificate
-        && ucf->ssl_certificate->value.len
-        && (ucf->ssl_certificate->lengths
-            || (ucf->ssl_certificate_key
-                && ucf->ssl_certificate_key->lengths)))
+    if (conf->ssl_certificate
+        && conf->ssl_certificate->value.len
+        && (conf->ssl_certificate->lengths
+            || (conf->ssl_certificate_key
+                && conf->ssl_certificate_key->lengths)))
     {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                       "\"health_check\" cannot use \"proxy_ssl_certificate\" "
                       "or \"proxy_ssl_certificate_key\" with variables "
-                      "in %V:%ui", &check->file, check->line);
+                      "in %V:%ui", &hc->file, hc->line);
         return NGX_ERROR;
     }
 
-    name = ucf->ssl_name ? ucf->ssl_name->value : ucf->upstream->host;
+    hc->ssl = conf->ssl;
 
     /* without a port, as ngx_http_upstream_ssl_name() does */
+
+    name = conf->ssl_name ? conf->ssl_name->value : hc->uscf->host;
 
     p = name.data;
     last = name.data + name.len;
@@ -492,13 +487,11 @@ ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
         name.len = p - name.data;
     }
 
-    check->ssl = ucf->ssl;
-    check->ssl_name = name;
-    check->ssl_verify = ucf->ssl_verify;
+    hc->ssl_name = name;
 
     /* as per RFC 6066, literal IPv4 and IPv6 addresses are not sent */
 
-    if (!ucf->ssl_server_name
+    if (!conf->ssl_server_name
         || name.len == 0
         || *name.data == '['
         || ngx_inet_addr(name.data, name.len) != INADDR_NONE)
@@ -506,14 +499,12 @@ ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
         return NGX_OK;
     }
 
-    p = ngx_pnalloc(cf->pool, name.len + 1);
-    if (p == NULL) {
+    hc->ssl_server_name = ngx_pnalloc(cf->pool, name.len + 1);
+    if (hc->ssl_server_name == NULL) {
         return NGX_ERROR;
     }
 
-    (void) ngx_cpystrn(p, name.data, name.len + 1);
-
-    check->ssl_server_name = p;
+    (void) ngx_cpystrn(hc->ssl_server_name, name.data, name.len + 1);
 
     return NGX_OK;
 }

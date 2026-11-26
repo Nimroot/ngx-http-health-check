@@ -106,37 +106,32 @@ typedef struct {
 
 
 /* One health_check directive. */
+
 typedef struct {
-    ngx_msec_t                          interval;
-    ngx_str_t                           uri;
-    ngx_str_t                           match_name;
-    ngx_http_hc_match_t                 *match;
-
-    void                              **loc_conf;
-    ngx_str_t                           file;
-    ngx_uint_t                          line;
-
-    ngx_http_hc_upstream_t              *upstream;
-    ngx_uint_t                          index;     /* bit in peer->failing */
-    ngx_msec_t                          connect_timeout;
-    ngx_msec_t                          send_timeout;
-    ngx_msec_t                          read_timeout;
+    ngx_http_upstream_srv_conf_t   *uscf;
+    ngx_http_upstream_conf_t       *conf;        /* the location's proxy_* */
+    ngx_http_hc_match_t            *match;
+    ngx_http_hc_upstream_t         *upstream;
+    ngx_uint_t                      index;       /* bit in peer->failing */
+    ngx_msec_t                      interval;
+    ngx_str_t                       uri;
     /* HTTP/1.1 request (proxy_http_version 1.1 or 2), else HTTP/1.0 */
-    ngx_flag_t                          http11;
-    ngx_str_t                           request;
+    ngx_flag_t                      http11;
+    ngx_str_t                       request;
 
 #if (NGX_HTTP_SSL)
-    /* proxy_pass https://: the location's SSL context, NULL for http:// */
-    ngx_ssl_t                          *ssl;
-    /* name the certificate must match if ssl_verify, without a port */
-    ngx_str_t                           ssl_name;
-    /* sent as SNI, null-terminated; NULL if none */
-    u_char                             *ssl_server_name;
-    ngx_flag_t                          ssl_verify;
+    ngx_ssl_t                      *ssl;         /* NULL for http:// */
+    ngx_str_t                       ssl_name;
+    u_char                         *ssl_server_name;
 #endif
 
-    ngx_event_t                         timer;
-    ngx_uint_t                          pending;
+    ngx_str_t                       match_name;
+    void                          **loc_conf;
+    ngx_str_t                       file;
+    ngx_uint_t                      line;
+
+    ngx_event_t                     timer;
+    ngx_uint_t                      pending;
 } ngx_http_hc_t;
 
 

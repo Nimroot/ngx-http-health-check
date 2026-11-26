@@ -406,7 +406,7 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
     probe->sent = check->request.data;
 
     /* for https, the SSL handshake must be done within it too */
-    ngx_add_timer(c->write, check->connect_timeout);
+    ngx_add_timer(c->write, check->conf->connect_timeout);
 
     if (rc == NGX_OK) {
         c->write->handler(c->write);
@@ -518,7 +518,7 @@ ngx_http_hc_ssl_handshaked(ngx_connection_t *c)
         return;
     }
 
-    if (check->ssl_verify) {
+    if (check->conf->ssl_verify) {
         rc = SSL_get_verify_result(c->ssl->connection);
 
         if (rc != X509_V_OK) {
@@ -594,7 +594,7 @@ ngx_http_hc_send(ngx_event_t *wev)
 
         if (n == NGX_AGAIN) {
             if (!wev->timer_set) {
-                ngx_add_timer(wev, check->send_timeout);
+                ngx_add_timer(wev, check->conf->send_timeout);
             }
 
             if (ngx_handle_write_event(wev, 0) != NGX_OK) {
@@ -613,7 +613,7 @@ ngx_http_hc_send(ngx_event_t *wev)
 
     wev->handler = ngx_http_hc_dummy;
 
-    ngx_add_timer(c->read, check->read_timeout);
+    ngx_add_timer(c->read, check->conf->read_timeout);
 
     if (c->read->ready) {
         ngx_http_hc_recv(c->read);
