@@ -28,6 +28,7 @@ typedef struct {
     ngx_http_upstream_rr_peers_t   *peers;
     ngx_http_upstream_rr_peer_t    *peer;
     ngx_pool_t                     *pool;
+    ngx_log_t                       log;
     ngx_peer_connection_t           pc;
     size_t                          sent;
     ngx_http_hc_response_t          resp;
@@ -52,6 +53,8 @@ static void ngx_http_hc_dummy(ngx_event_t *ev);
 static void ngx_http_hc_finish(ngx_http_hc_probe_t *p, const char *reason);
 static void ngx_http_hc_abort(ngx_http_hc_probe_t *p, const char *reason);
 static void ngx_http_hc_close(ngx_http_hc_probe_t *p);
+static u_char *ngx_http_hc_log_error(ngx_log_t *log, u_char *buf,
+    size_t len);
 
 
 /* worker 0's probes waiting for a connection */
@@ -226,7 +229,11 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *p)
 
     conf = p->check->conf;
 
-    p->pool = ngx_create_pool(1024, ngx_cycle->log);
+    p->log = *ngx_cycle->log;
+    p->log.handler = ngx_http_hc_log_error;
+    p->log.data = p;
+
+    p->pool = ngx_create_pool(1024, &p->log);
     if (p->pool == NULL) {
         ngx_http_hc_abort(p, "out of memory");
         return;
@@ -236,7 +243,7 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *p)
     p->pc.socklen = p->peer->socklen;
     p->pc.name = &p->peer->name;
     p->pc.get = ngx_event_get_peer;
-    p->pc.log = ngx_cycle->log;
+    p->pc.log = &p->log;
     p->pc.log_error = NGX_ERROR_INFO;
 
     rc = ngx_event_connect_peer(&p->pc);
@@ -260,6 +267,8 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *p)
     /* don't hold up a worker that shuts down */
     c->read->cancelable = 1;
     c->write->cancelable = 1;
+
+    p->log.connection = c->number;
 
     if (ngx_http_hc_response_init(&p->resp, c, conf->buffer_size,
                                   p->check->match && p->check->match->body)
@@ -669,4 +678,14 @@ ngx_http_hc_close(ngx_http_hc_probe_t *p)
     ngx_http_upstream_rr_peers_unlock(p->peers);
 
     ngx_free(p);
+}
+
+
+static u_char *
+ngx_http_hc_log_error(ngx_log_t *log, u_char *buf, size_t len)
+{
+    ngx_http_hc_probe_t  *p = log->data;
+
+    return ngx_snprintf(buf, len, " while checking peer %V in upstream \"%V\"",
+                        &p->peer->name, &p->check->uscf->host);
 }

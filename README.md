@@ -170,6 +170,9 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
       peer 10.0.0.2:8080 in upstream "backend" passes health_check in /etc/nginx/nginx.conf:23, but fails another
       peer 10.0.0.2:8080 in upstream "backend" is healthy
 
+  nginx's own messages about a check's connection, such as a failed connect
+  or TLS handshake, end with `while checking peer ... in upstream "..."`.
+
 ## Differences from NGINX Plus
 
 | | NGINX Plus | This module |
