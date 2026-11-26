@@ -28,7 +28,7 @@ dns() {
 served() {
     local i out
     for i in {1..8}; do
-        out=$(curl -s -w ' %{http_code}' "$BASE$1")
+        out=$(curl -s -m 5 -w ' %{http_code}' "$BASE$1")
         out=${out//$'\n'/}
         if [[ $out == *" 200" ]]; then echo "${out% *}"; else echo "${out##* }"; fi
     done | sort -u | paste -sd, -
@@ -55,7 +55,7 @@ now() {
 # e.g. "503 503, 503" = two attempts, both answered 503
 attempts() {
     local got
-    got=$(curl -s -o /dev/null -w '%{http_code} %header{x-upstream-status}' "$BASE$2")
+    got=$(curl -s -m 5 -o /dev/null -w '%{http_code} %header{x-upstream-status}' "$BASE$2")
     [[ $got == "$3" ]] && ok "$1" "$got" || bad "$1" "got '$got', want '$3'"
 }
 
@@ -71,7 +71,7 @@ logged() {
     bad "$1" "not in log: $2"
 }
 
-for _ in {1..40}; do curl -sf "$BASE/healthz" >/dev/null && break; sleep 0.25; done
+for _ in {1..40}; do curl -sf -m 1 "$BASE/healthz" >/dev/null && break; sleep 0.25; done
 
 echo "all healthy"
 set_state
