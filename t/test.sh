@@ -204,6 +204,22 @@ since=$(date +%s); set_state
 expect "two: 9101 back"                        /two/ 9101,9102
 logged "two: healthy" 'peer 127.0.0.1:9101 in upstream "hc_two" is healthy'
 
+# --- draining server -------------------------------------------------------------
+# In hc_drain, 9101 is "drain": only clients bound to it (sticky cookie
+# srv=a) get it. It is checked like any other, and an unhealthy one loses
+# them too.
+
+echo "drain"
+expect "drain: new clients get 9102"           /drain/ 9102
+expect "drain: srv=a still gets 9101"          /drain/ 9101 -b srv=a
+since=$(date +%s); set_state "touch /tmp/hc/9101.fail"
+expect "drain: unhealthy 9101 loses srv=a"     /drain/ 9102 -b srv=a
+logged "drain: the draining server is checked" \
+       'peer 127.0.0.1:9101 in upstream "hc_drain" is unhealthy'
+set_state
+expect "drain: srv=a gets 9101 again"          /drain/ 9101 -b srv=a
+now    "drain: still draining for new clients" /drain/ 9102
+
 # --- servers from DNS ("resolve") ----------------------------------------------
 # nginx re-resolves dyn.test every second (resolver valid=1s).
 

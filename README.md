@@ -127,7 +127,9 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   start healthy then, as do servers added by `resolve`.
 - Servers marked `down` in the configuration are never checked or brought
   up. That includes servers added by `resolve`, also from SRV records
-  (`service=`).
+  (`service=`). A server marked `drain` is checked like any other: while it
+  is unhealthy, it gets no requests at all, not even from clients bound to
+  it by `sticky`.
 - A check opens a new connection to each server and sends `GET <uri>` with
   the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
   `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is
@@ -222,6 +224,7 @@ where requests go:
 - `proxy_next_upstream` counts only healthy servers;
 - with two checks of one group, a server is used only while it passes both;
   restarting the workers keeps the state, with no new warning;
+- a `drain` server is checked, and when unhealthy loses its `sticky` clients;
 - with `resolve`, servers added by DNS are checked, and removing an unhealthy
   server leaves the count of usable servers correct (dnsmasq in the container
   serves the changing answers); an SRV server marked `down` gets neither
