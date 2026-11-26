@@ -35,30 +35,35 @@ dns() {
         sh "$@"
 }
 
-# served PATH: which backends answer 8 requests, e.g. "9101,9102", "9102", "502"
+# served PATH [CURL_ARG...]: who answers 8 requests, e.g. "9101,9102", "502"
 served() {
-    local i out
+    local path=$1 i out
+    shift
     for i in {1..8}; do
-        out=$(curl -s -m 5 -w ' %{http_code}' "$BASE$1")
+        out=$(curl -s -m 5 -w ' %{http_code}' "$@" "$BASE$path")
         out=${out//$'\n'/}
         if [[ $out == *" 200" ]]; then echo "${out% *}"; else echo "${out##* }"; fi
     done | sort -u | paste -sd, -
 }
 
-# expect NAME PATH WANT: waits up to $WAIT seconds for PATH to be served by WANT
+# expect NAME PATH WANT [CURL_ARG...]: waits up to $WAIT seconds for PATH to
+# be served by WANT
 expect() {
     local name=$1 path=$2 want=$3 got start=$SECONDS
+    shift 3
     while :; do
-        got=$(served "$path")
+        got=$(served "$path" "$@")
         [[ $got == "$want" ]] && { ok "$name" "$got ($((SECONDS - start))s)"; return; }
         ((SECONDS - start >= WAIT)) && { bad "$name" "got $got, want $want"; return; }
         sleep 0.5
     done
 }
 
-# now NAME PATH WANT: checked once (a state that must hold)
+# now NAME PATH WANT [CURL_ARG...]: checked once (a state that must hold)
 now() {
-    is "$1" "$(served "$2")" "$3"
+    local name=$1 path=$2 want=$3
+    shift 3
+    is "$name" "$(served "$path" "$@")" "$want"
 }
 
 # attempts NAME PATH WANT: status and $upstream_status of a /flaky/ request,
