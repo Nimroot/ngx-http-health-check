@@ -404,9 +404,9 @@ conf_test "no proxy_pass"                           'needs "proxy_pass" to an up
     "$(srv 'location / { health_check; }')"
 conf_test "https upstream"                          ok \
     "$(srv 'location / { proxy_pass https://z; health_check; }')"
-conf_test "https: proxy_ssl_name with a variable"   'cannot use "proxy_ssl_name" with variables' \
+conf_test "https: proxy_ssl_name with a variable"   'with variables' \
     "$(srv 'location / { proxy_pass https://z; proxy_ssl_name $host; health_check; }')"
-conf_test "https: certificate with a variable"      'cannot use "proxy_ssl_certificate"' \
+conf_test "https: certificate with a variable"      'with variables' \
     "$(srv 'location / { proxy_pass https://z; proxy_ssl_certificate /c/$host.crt; proxy_ssl_certificate_key /c/$host.key; health_check; }')"
 conf_test "unsupported parameter fails="            '"fails=3" is not supported' \
     "$(srv 'location / { proxy_pass http://z; health_check fails=3; }')"

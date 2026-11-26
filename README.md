@@ -182,9 +182,10 @@ not from testing against NGINX Plus.
 - **The response must be HTTP/1.x**, with no transfer coding other than
   `chunked` (none at all in answer to HTTP/1.0).
 - **The response header is limited to 32k.** A larger one fails the check.
-- **https:** a check has no request to take variables from, so
+- **No variables:** a check has no request to evaluate them for, so
   `proxy_ssl_name` and `proxy_ssl_certificate` (and its key) must be fixed
-  strings. ALPN isn't sent.
+  strings.
+- **https:** ALPN isn't sent.
 - **Zone size:** nginx's minimum for an upstream `zone` depends on the memory
   page size. The 64k used in many examples is too small on systems with 16k
   pages (some arm64 systems); 256k works there.

@@ -420,12 +420,10 @@ ngx_http_hc_postconf(ngx_conf_t *cf)
 #if (NGX_HTTP_SSL)
 
 /*
- * proxy_pass https://: probes use the location's SSL context, so its
- * protocols, ciphers, client certificate and trusted certificates, and
- * proxy_ssl_verify, proxy_ssl_server_name and proxy_ssl_name, as requests
- * do. The name defaults to the group's name, as $proxy_host does. A probe
- * isn't a request, so a name or certificate given with variables has no
- * value for it.
+ * proxy_pass https://: probes use the location's SSL context and its
+ * proxy_ssl_verify, proxy_ssl_server_name and proxy_ssl_name, whose default
+ * is the group's name, as requests do. With no request to evaluate them
+ * for, a name or certificate given with variables has no value.
  */
 
 static ngx_int_t
@@ -437,30 +435,17 @@ ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *hc)
 
     conf = hc->conf;
 
-    if (conf->ssl == NULL || conf->ssl->ctx == NULL) {
-        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
-                      "no SSL context for \"health_check\" in %V:%ui",
-                      &hc->file, hc->line);
-        return NGX_ERROR;
-    }
-
-    if (conf->ssl_name && conf->ssl_name->lengths) {
-        ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
-                      "\"health_check\" cannot use \"proxy_ssl_name\" "
-                      "with variables in %V:%ui", &hc->file, hc->line);
-        return NGX_ERROR;
-    }
-
-    if (conf->ssl_certificate
-        && conf->ssl_certificate->value.len
-        && (conf->ssl_certificate->lengths
-            || (conf->ssl_certificate_key
-                && conf->ssl_certificate_key->lengths)))
+    if ((conf->ssl_name && conf->ssl_name->lengths)
+        || (conf->ssl_certificate
+            && conf->ssl_certificate->value.len
+            && (conf->ssl_certificate->lengths
+                || conf->ssl_certificate_key->lengths)))
     {
         ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
-                      "\"health_check\" cannot use \"proxy_ssl_certificate\" "
-                      "or \"proxy_ssl_certificate_key\" with variables "
-                      "in %V:%ui", &hc->file, hc->line);
+                      "\"health_check\" cannot use \"proxy_ssl_name\", "
+                      "\"proxy_ssl_certificate\" or "
+                      "\"proxy_ssl_certificate_key\" with variables in %V:%ui",
+                      &hc->file, hc->line);
         return NGX_ERROR;
     }
 
