@@ -13,8 +13,6 @@
 
 
 #define NGX_HTTP_HC_BODY_MAX    (256 * 1024)
-#define NGX_HTTP_HC_HEADER_MAX  (32 * 1024)
-#define NGX_HTTP_HC_BUF_MAX     (NGX_HTTP_HC_HEADER_MAX + NGX_HTTP_HC_BODY_MAX)
 #define NGX_HTTP_HC_BUF_INIT    4096
 
 
@@ -628,7 +626,7 @@ static void
 ngx_http_hc_recv(ngx_event_t *rev)
 {
     u_char               *p;
-    size_t                size, body;
+    size_t                size, body, max;
     ssize_t               n;
     ngx_buf_t            *b;
     ngx_int_t             rc;
@@ -638,6 +636,9 @@ ngx_http_hc_recv(ngx_event_t *rev)
     c = rev->data;
     probe = c->data;
     b = &probe->buf;
+
+    /* the header, and the part of the body that is examined */
+    max = probe->check->conf->buffer_size + NGX_HTTP_HC_BODY_MAX;
 
     if (rev->timedout) {
         ngx_http_hc_finish(probe, "timed out reading the response");
@@ -661,16 +662,17 @@ ngx_http_hc_recv(ngx_event_t *rev)
         if (b->last == b->end) {
             size = b->end - b->start;
 
-            if (size >= NGX_HTTP_HC_BUF_MAX) {
+            if (size >= max) {
                 /*
                  * Only the first 256k of the body are examined. The header
-                 * is at most 32k, so the buffer holds at least that much.
+                 * is at most proxy_buffer_size, so the buffer holds at least
+                 * that much.
                  */
                 ngx_http_hc_evaluate(probe);
                 return;
             }
 
-            size = ngx_min(size * 2, NGX_HTTP_HC_BUF_MAX);
+            size = ngx_min(size * 2, max);
 
             p = ngx_palloc(probe->pool, size);
             if (p == NULL) {
@@ -782,6 +784,7 @@ static ngx_int_t
 ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
 {
     off_t          len;
+    size_t         max;
     u_char        *p, *q, *line, *end, *nl, *colon, *v;
     ngx_buf_t     *b;
     ngx_uint_t     first;
@@ -790,6 +793,9 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
     b = &probe->buf;
     p = b->start;
     first = 1;
+
+    /* the header must fit in proxy_buffer_size, as for requests */
+    max = probe->check->conf->buffer_size;
 
     probe->content_length = -1;
     probe->bodyless = 0;
@@ -816,16 +822,14 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
         nl = ngx_strlchr(p, b->last, LF);
 
         if (nl == NULL) {
-            if ((size_t) (b->last - b->start)
-                >= NGX_HTTP_HC_HEADER_MAX)
-            {
+            if ((size_t) (b->last - b->start) >= max) {
                 goto too_large;
             }
 
             return NGX_AGAIN;
         }
 
-        if ((size_t) (nl + 1 - b->start) > NGX_HTTP_HC_HEADER_MAX) {
+        if ((size_t) (nl + 1 - b->start) > max) {
             goto too_large;
         }
 
@@ -1153,8 +1157,8 @@ ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
          */
 
         if (rc == NGX_AGAIN
-            && probe->buf.last - probe->buf.start
-               < NGX_HTTP_HC_BUF_MAX)
+            && (size_t) (probe->buf.last - probe->buf.start)
+               < probe->check->conf->buffer_size + NGX_HTTP_HC_BODY_MAX)
         {
             ngx_http_hc_finish(probe, "connection closed before the response "
                                       "body was complete");

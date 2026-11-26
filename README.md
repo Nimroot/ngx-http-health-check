@@ -137,6 +137,7 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 - Servers marked `down` in the configuration are never checked or brought up.
   That includes servers added by `resolve`, also from SRV records
   (`service=`), whose names are those of the records' targets.
+- The response header must fit in `proxy_buffer_size`, as for requests.
 - A response passes only if it is complete: a response with status 1xx, 204
   or 304 ends with its header; any other body ends after `Content-Length`
   bytes (or the first 256k of them), with the last chunk of a
@@ -179,7 +180,6 @@ not from testing against NGINX Plus.
 
 - **Worker 0 runs all checks.** If it is busy or stuck, checks are delayed.
 - **The response must be HTTP/1.x.**
-- **The response header is limited to 32k.** A larger one fails the check.
 - **No variables:** a check has no request to evaluate them for, so
   `proxy_ssl_name` and `proxy_ssl_certificate` (and its key) must be fixed
   strings.
@@ -220,9 +220,9 @@ where requests go:
   serves the changing answers); an SRV server marked `down` gets neither
   probes nor requests;
 - incomplete or ambiguously delimited responses fail, served byte for byte by
-  socat; responses without a body or delimited by closing pass; a connection
-  closed without a response, or TLS data in answer to `http://`, fail with a
-  reason saying so;
+  socat; responses without a body or delimited by closing pass; a header
+  over `proxy_buffer_size`, a connection closed without a response, or TLS
+  data in answer to `http://` fail with a reason saying so;
 - chunked bodies decoded for `match`, incomplete or invalid ones failing; an
   HTTP/1.0 check failing on a server that answers HTTP/1.0 with 426, as Envoy
   does by default;

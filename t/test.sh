@@ -239,7 +239,7 @@ is     "srv: config-down SRV server not probed" "$(cx "wc -l < /tmp/srv-health.l
 # 127.0.0.1:9301 (socat) sends /tmp/raw/resp verbatim and closes. While it
 # is healthy, requests get its response ("ok", 204, or 502 if nginx's proxy
 # rejects it); once it is unhealthy, the backup server 9102 answers. hc_raw
-# probes with HTTP/1.0, hc_raw11 with HTTP/1.1.
+# probes with HTTP/1.0 and proxy_buffer_size 1k, hc_raw11 with HTTP/1.1.
 
 ok_resp='HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 
@@ -267,6 +267,11 @@ raw 'HTTP/1.1 200 OK\r\nContent-Length : 100\r\n\r\nok\n'
 expect "raw: whitespace before colon fails"    /raw/ 9102
 raw "$ok_resp"
 expect "raw: complete response passes once more" /raw/ ok
+since=$(date +%s)
+raw "HTTP/1.1 200 OK\r\nX-Pad: $(printf '%01500d' 0)\r\nContent-Length: 3\r\n\r\nok\n"
+expect "raw: header over proxy_buffer_size fails" /raw/ 9102
+logged "reason: header too large" 'upstream "hc_raw" is unhealthy: response header too large'
+expect "raw11: fits its proxy_buffer_size"     /raw11/ ok
 since=$(date +%s)
 raw ''
 expect "raw: closed without a response fails"  /raw/ 9102
