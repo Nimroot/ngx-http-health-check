@@ -44,7 +44,6 @@ static ngx_int_t ngx_http_hc_postconf(ngx_conf_t *cf);
 static ngx_int_t ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
     ngx_http_proxy_loc_conf_t *plcf);
 #endif
-static ngx_int_t ngx_http_hc_init_process(ngx_cycle_t *cycle);
 
 
 static ngx_command_t  ngx_http_hc_commands[] = {
@@ -534,49 +533,3 @@ ngx_http_hc_ssl_conf(ngx_conf_t *cf, ngx_http_hc_t *check,
 }
 
 #endif
-
-/* Checks run in worker 0 only. */
-
-static ngx_int_t
-ngx_http_hc_init_process(ngx_cycle_t *cycle)
-{
-    ngx_uint_t                i;
-    ngx_http_hc_t           **checks;
-    ngx_http_hc_upstream_t  **ups;
-    ngx_http_hc_main_conf_t  *hmcf;
-
-    if ((ngx_process != NGX_PROCESS_WORKER && ngx_process != NGX_PROCESS_SINGLE)
-        || ngx_worker != 0)
-    {
-        return NGX_OK;
-    }
-
-    hmcf = ngx_http_cycle_get_module_main_conf(cycle,
-                                               ngx_http_health_check_module);
-    if (hmcf == NULL) {
-        return NGX_OK;
-    }
-
-    ngx_http_hc_probe_init(cycle);
-
-    ups = hmcf->upstreams.elts;
-    for (i = 0; i < hmcf->upstreams.nelts; i++) {
-        ups[i]->peers = ngx_array_create(cycle->pool, 4,
-                                         sizeof(ngx_http_hc_peer_t));
-        if (ups[i]->peers == NULL) {
-            return NGX_ERROR;
-        }
-    }
-
-    checks = hmcf->checks.elts;
-    for (i = 0; i < hmcf->checks.nelts; i++) {
-        checks[i]->timer.handler = ngx_http_hc_run;
-        checks[i]->timer.data = checks[i];
-        checks[i]->timer.log = cycle->log;
-        checks[i]->timer.cancelable = 1;
-
-        ngx_add_timer(&checks[i]->timer, 1);
-    }
-
-    return NGX_OK;
-}

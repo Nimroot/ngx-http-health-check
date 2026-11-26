@@ -197,9 +197,9 @@ not from testing against NGINX Plus.
 | File | |
 |---|---|
 | `config` | nginx build script for `--add-module` / `--add-dynamic-module` |
-| `src/ngx_http_health_check_module.c` | module definition, `health_check` directive, configuration checks, start-up in worker 0 |
+| `src/ngx_http_health_check_module.c` | module definition, `health_check` directive, configuration checks |
 | `src/ngx_http_health_check_match.c` | `match` block: parsing its tests and running them against a response |
-| `src/ngx_http_health_check_probe.c` | probing servers (connect, send, read, parse) and recording their health |
+| `src/ngx_http_health_check_probe.c` | starting checks in worker 0, probing servers (connect, send, read, parse) and recording their health |
 | `src/ngx_http_health_check.h` | types shared by the source files |
 | `t/` | test container and black-box tests (see below) |
 

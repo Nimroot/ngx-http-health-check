@@ -161,11 +161,7 @@ u_char *ngx_http_hc_match_response(ngx_http_hc_match_t *match,
     ngx_pool_t *pool, ngx_uint_t status, ngx_array_t *headers,
     ngx_str_t *body);
 
-/* Sets up probing in worker 0, before the first check runs. */
-void ngx_http_hc_probe_init(ngx_cycle_t *cycle);
-
-/* Timer handler of a health check; ev->data is its ngx_http_hc_t. */
-void ngx_http_hc_run(ngx_event_t *ev);
+ngx_int_t ngx_http_hc_init_process(ngx_cycle_t *cycle);
 
 
 #endif /* _NGX_HTTP_HEALTH_CHECK_H_INCLUDED_ */
