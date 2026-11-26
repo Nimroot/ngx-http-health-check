@@ -50,31 +50,9 @@
  */
 
 
-#include <ngx_config.h>
-#include <ngx_core.h>
-#include <ngx_http.h>
-
-
-#if (nginx_version < 1029004)
-#error ngx_http_health_check_module needs nginx 1.29.4 or later
-#endif
-
+#include "ngx_http_health_check.h"
 
 #include <ngx_http_proxy_module.h>
-
-
-#if !(NGX_HTTP_UPSTREAM_ZONE)
-#error ngx_http_health_check_module needs ngx_http_upstream_zone_module
-#endif
-
-#if !(NGX_PCRE)
-#error ngx_http_health_check_module needs PCRE
-#endif
-
-
-#include "ngx_http_health_check.h"
-#include "ngx_http_health_check_match.h"
-#include "ngx_http_health_check_probe.h"
 
 
 #define NGX_HTTP_HEALTH_CHECK_MAX_CHECKS  64    /* per group: failing bits */

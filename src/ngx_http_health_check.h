@@ -2,7 +2,11 @@
  * Copyright (C) 2026 The ngx_http_health_check authors
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Types shared by the module's source files.
+ * Types shared by the module's source files:
+ *
+ *     ngx_http_health_check_module.c     directives, configuration
+ *     ngx_http_health_check_match.c      match blocks and their tests
+ *     ngx_http_health_check_probe.c      probing servers, recording health
  */
 
 
@@ -14,7 +18,68 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "ngx_http_health_check_match.h"
+
+#if (nginx_version < 1029004)
+#error ngx_http_health_check_module needs nginx 1.29.4 or later
+#endif
+
+#if !(NGX_HTTP_UPSTREAM_ZONE)
+#error ngx_http_health_check_module needs ngx_http_upstream_zone_module
+#endif
+
+#if !(NGX_PCRE)
+#error ngx_http_health_check_module needs PCRE
+#endif
+
+
+enum {
+    NGX_HTTP_HEALTH_CHECK_STATUS = 0,
+    NGX_HTTP_HEALTH_CHECK_HEADER,
+    NGX_HTTP_HEALTH_CHECK_BODY
+};
+
+
+enum {
+    NGX_HTTP_HEALTH_CHECK_HEADER_PRESENT = 0,   /* header Name;          */
+    NGX_HTTP_HEALTH_CHECK_HEADER_ABSENT,        /* header ! Name;        */
+    NGX_HTTP_HEALTH_CHECK_HEADER_EQ,            /* header Name = value;  */
+    NGX_HTTP_HEALTH_CHECK_HEADER_NE,            /* header Name != value; */
+    NGX_HTTP_HEALTH_CHECK_HEADER_RE,            /* header Name ~ regex;  */
+    NGX_HTTP_HEALTH_CHECK_HEADER_NRE            /* header Name !~ regex; */
+};
+
+
+typedef struct {
+    ngx_uint_t                          low;
+    ngx_uint_t                          high;
+} ngx_http_health_check_range_t;
+
+
+typedef struct {
+    ngx_uint_t                          type;
+    ngx_uint_t                          op;        /* header tests */
+    ngx_uint_t                          negate;    /* status and body tests */
+    /* ngx_http_health_check_range_t */
+    ngx_array_t                        *ranges;
+    ngx_str_t                           name;
+    ngx_str_t                           value;
+    ngx_regex_t                        *regex;
+    ngx_str_t                           text;      /* the test as written */
+} ngx_http_health_check_test_t;
+
+
+typedef struct {
+    ngx_str_t                           name;
+    /* ngx_http_health_check_test_t */
+    ngx_array_t                         tests;
+} ngx_http_health_check_match_t;
+
+
+/* A header line of a check response. */
+typedef struct {
+    ngx_str_t                           name;
+    ngx_str_t                           value;
+} ngx_http_health_check_header_t;
 
 
 /* Health of one server address, kept by worker 0. */
@@ -86,6 +151,21 @@ typedef struct {
 
 
 extern ngx_module_t  ngx_http_health_check_module;
+
+
+char *ngx_http_health_check_match_block(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+ngx_http_health_check_match_t *ngx_http_health_check_match_find(
+    ngx_array_t *matches, ngx_str_t *name);
+u_char *ngx_http_health_check_match_response(
+    ngx_http_health_check_match_t *match, ngx_pool_t *pool, ngx_uint_t status,
+    ngx_array_t *headers, ngx_str_t *body);
+
+/* Sets up probing in worker 0, before the first check runs. */
+void ngx_http_health_check_probe_init(ngx_cycle_t *cycle);
+
+/* Timer handler of a health check; ev->data is its ngx_http_health_check_t. */
+void ngx_http_health_check_run(ngx_event_t *ev);
 
 
 #endif /* _NGX_HTTP_HEALTH_CHECK_H_INCLUDED_ */

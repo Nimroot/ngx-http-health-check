@@ -7,12 +7,7 @@
  */
 
 
-#include <ngx_config.h>
-#include <ngx_core.h>
-#include <ngx_http.h>
-
 #include "ngx_http_health_check.h"
-#include "ngx_http_health_check_match.h"
 
 
 static char *ngx_http_health_check_match_test(ngx_conf_t *cf,

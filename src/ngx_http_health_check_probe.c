@@ -9,13 +9,7 @@
  */
 
 
-#include <ngx_config.h>
-#include <ngx_core.h>
-#include <ngx_http.h>
-
 #include "ngx_http_health_check.h"
-#include "ngx_http_health_check_match.h"
-#include "ngx_http_health_check_probe.h"
 
 
 #define NGX_HTTP_HEALTH_CHECK_BODY_MAX    (256 * 1024)
