@@ -303,7 +303,7 @@ ngx_http_hc_match_find(ngx_array_t *matches, ngx_str_t *name)
 /*
  * NULL if the response passes every test of "match" (without a match block:
  * if its status is 2xx or 3xx), otherwise why it failed. "headers" holds
- * ngx_http_hc_header_t; the reason is allocated from "pool".
+ * ngx_keyval_t; the reason is allocated from "pool".
  */
 
 u_char *
@@ -348,11 +348,11 @@ static u_char *
 ngx_http_hc_run_test(ngx_http_hc_test_t *t, ngx_pool_t *pool,
     ngx_uint_t status, ngx_array_t *headers, ngx_str_t *body)
 {
-    u_char                *reason;
-    ngx_int_t              rc;
-    ngx_uint_t             i, found, pass;
-    ngx_http_hc_range_t   *range;
-    ngx_http_hc_header_t  *h;
+    u_char               *reason;
+    ngx_int_t             rc;
+    ngx_uint_t            i, found, pass;
+    ngx_keyval_t         *h;
+    ngx_http_hc_range_t  *range;
 
     pass = 0;
 
@@ -377,8 +377,8 @@ ngx_http_hc_run_test(ngx_http_hc_test_t *t, ngx_pool_t *pool,
         found = 0;
 
         for (i = 0; i < headers->nelts; i++) {
-            if (h[i].name.len != t->name.len
-                || ngx_strncasecmp(h[i].name.data, t->name.data, t->name.len)
+            if (h[i].key.len != t->name.len
+                || ngx_strncasecmp(h[i].key.data, t->name.data, t->name.len)
                    != 0)
             {
                 continue;

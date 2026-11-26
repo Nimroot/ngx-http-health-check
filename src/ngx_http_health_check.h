@@ -75,13 +75,6 @@ typedef struct {
 } ngx_http_hc_match_t;
 
 
-/* A header line of a check response. */
-typedef struct {
-    ngx_str_t                           name;
-    ngx_str_t                           value;
-} ngx_http_hc_header_t;
-
-
 /* Health of one server address, kept by worker 0. */
 typedef struct {
     struct sockaddr                    *sockaddr;

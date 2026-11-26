@@ -34,7 +34,7 @@ struct ngx_http_hc_probe_s {
     ngx_uint_t                          status;
     size_t                              header_len;
     off_t                               content_length;
-    /* ngx_http_hc_header_t */
+    /* ngx_keyval_t */
     ngx_array_t                        *headers;
     /* why ngx_http_hc_parse() rejected the response */
     u_char                             *error;
@@ -787,11 +787,11 @@ ngx_http_hc_dummy(ngx_event_t *ev)
 static ngx_int_t
 ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
 {
-    off_t                  len;
-    u_char                *p, *q, *line, *end, *nl, *colon, *v;
-    ngx_buf_t             *b;
-    ngx_uint_t             first;
-    ngx_http_hc_header_t  *h;
+    off_t          len;
+    u_char        *p, *q, *line, *end, *nl, *colon, *v;
+    ngx_buf_t     *b;
+    ngx_uint_t     first;
+    ngx_keyval_t  *h;
 
     b = &probe->buf;
     p = b->start;
@@ -804,7 +804,7 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
 
     if (store) {
         probe->headers = ngx_array_create(probe->pool, 8,
-                                    sizeof(ngx_http_hc_header_t));
+                                          sizeof(ngx_keyval_t));
         if (probe->headers == NULL) {
             return NGX_ABORT;
         }
@@ -948,8 +948,8 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
                 return NGX_ABORT;
             }
 
-            h->name.data = line;
-            h->name.len = colon - line;
+            h->key.data = line;
+            h->key.len = colon - line;
             h->value.data = v;
             h->value.len = end - v;
         }
