@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Black-box tests (see the Makefile: make test). Runs the test image in a
 # container of its own, breaks and repairs backends (files in /tmp/hc/),
-# changes DNS answers (/tmp/dns/hosts), and checks where requests go. Then
-# checks configuration errors with `nginx -t`. Exit code = number of failures.
+# changes DNS answers (/tmp/dns/hosts) and raw responses (/tmp/raw/resp),
+# and checks where requests go and what is logged. Then checks configuration
+# errors with `nginx -t`. Exit code = number of failures.
 set -uo pipefail
 
 ENGINE="${ENGINE:-podman}"
@@ -33,6 +34,13 @@ dns() {
     "$ENGINE" exec "$C" sh -c \
         'for a in "$@"; do echo "$a dyn.test"; done > /tmp/dns/hosts && pkill -HUP dnsmasq' \
         sh "$@"
+}
+
+# raw FORMAT: socat's response from now on, as a printf format
+raw() {
+    "$ENGINE" exec "$C" sh -c \
+        'printf "$1" > /tmp/raw/resp.new && mv /tmp/raw/resp.new /tmp/raw/resp' \
+        sh "$1"
 }
 
 # served PATH [CURL_ARG...]: who answers 8 requests, e.g. "9101,9102", "502"
@@ -191,15 +199,10 @@ is     "srv: config-down SRV server not probed" "$(cx "wc -l < /tmp/srv-health.l
 # is healthy, requests get its response ("ok", 204, or 502 if nginx's proxy
 # rejects it); once it is unhealthy, the backup server 9102 answers.
 
-# raw FORMAT: the server's response from now on, as a printf format
-raw() {
-    "$ENGINE" exec "$C" sh -c \
-        'printf "$1" > /tmp/raw/resp.new && mv /tmp/raw/resp.new /tmp/raw/resp' \
-        sh "$1"
-}
+ok_resp='HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
 
 echo "response framing"
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+raw "$ok_resp"
 expect "raw: complete response passes"         /raw/ ok
 since=$(date +%s)
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok\n'
@@ -216,7 +219,7 @@ raw 'HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\n'
 expect "raw: 204 needs no body"                /raw/ 204
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Length: 3\r\n\r\nok\n'
 expect "raw: conflicting Content-Length fails (reversed)" /raw/ 9102
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+raw "$ok_resp"
 expect "raw: complete response passes again"   /raw/ ok
 since=$(date +%s)
 raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nok\n\r\n0\r\n\r\n'
@@ -224,19 +227,19 @@ expect "raw: Transfer-Encoding fails"          /raw/ 9102
 logged "reason: Transfer-Encoding" 'is unhealthy: unsupported Transfer-Encoding'
 raw 'HTTP/1.1 200 OK\r\nContent-Length : 100\r\n\r\nok\n'
 expect "raw: whitespace before colon fails"    /raw/ 9102
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+raw "$ok_resp"
 expect "raw: complete response passes once more" /raw/ ok
 since=$(date +%s)
 raw ''
 expect "raw: closed without a response fails"  /raw/ 9102
 logged "reason: no response" 'is unhealthy: connection closed without a response'
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+raw "$ok_resp"
 expect "raw: complete response passes yet again" /raw/ ok
 since=$(date +%s)
 raw '\025\003\003\000\002\002\106'
 expect "raw: TLS alert fails"                  /raw/ 9102
 logged "reason: TLS instead of HTTP" 'is unhealthy: TLS data instead of an HTTP response'
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+raw "$ok_resp"
 expect "raw: healthy at the end"               /raw/ ok
 
 # hc_raw11 probes the same socat with HTTP/1.1 (nginx's default
@@ -262,13 +265,13 @@ since=$(date +%s)
 raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n'
 expect "raw11: other transfer coding fails"    /raw11/ 9102
 logged "reason: unsupported coding" 'upstream "hc_raw11" is unhealthy: unsupported Transfer-Encoding'
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+raw "$ok_resp"
 expect "raw11: plain response: healthy"        /raw11/ ok
 since=$(date +%s)
 raw 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nok\n\r\n0\r\n\r\n'
 expect "raw11: invalid chunk size fails"       /raw11/ 9102
 logged "reason: invalid chunked body" 'upstream "hc_raw11" is unhealthy: invalid chunked body'
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+raw "$ok_resp"
 expect "raw11: healthy at the end"             /raw11/ ok
 expect "raw: healthy at the end too"           /raw/ ok
 
