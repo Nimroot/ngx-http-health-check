@@ -404,6 +404,9 @@ conf_test "match: invalid regex"                    'pcre2_compile() failed' \
 conf_test "match: duplicate name"                   'duplicate match "m"' \
     'match m { status 200; }'
 
+is "log: no alert, crit or emerg" \
+   "$("$ENGINE" logs "$C" 2>&1 | grep -E '\[(alert|crit|emerg)\]')" ""
+
 echo
 echo "$pass passed, $fail failed"
 exit "$fail"
