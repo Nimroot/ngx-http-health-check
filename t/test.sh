@@ -92,6 +92,24 @@ logged() {
     bad "$1" "not in log: $2"
 }
 
+# extra_nginx DIR: starts a second nginx in the container, with its
+# config, pid and log in DIR and the http block read from stdin
+extra_nginx() {
+    local dir=$1 http
+    http=$(cat)
+    "$ENGINE" exec -i "$C" sh -c "mkdir -p $dir && cat > $dir/nginx.conf && nginx -c $dir/nginx.conf" <<EOF
+load_module modules/ngx_http_health_check_module.so;
+worker_processes 1;
+error_log $dir/error.log info;
+pid $dir/nginx.pid;
+events { worker_connections 16; }
+http {
+    access_log off;
+$http
+}
+EOF
+}
+
 for _ in {1..40}; do curl -sf -m 1 "$BASE/healthz" >/dev/null && break; sleep 0.25; done
 
 echo "all healthy"
@@ -307,14 +325,7 @@ logged "tls: unknown CA fails" \
 # wait for a slot, not fail the server.
 
 echo "probes beyond worker_connections"
-"$ENGINE" exec -i "$C" sh -c 'mkdir -p /tmp/m3 && cat > /tmp/m3/nginx.conf' <<EOF
-load_module modules/ngx_http_health_check_module.so;
-worker_processes 1;
-error_log /tmp/m3/error.log info;
-pid /tmp/m3/nginx.pid;
-events { worker_connections 16; }
-http {
-    access_log off;
+extra_nginx /tmp/many <<EOF
     upstream many {
         zone many 256k;
 $(for _ in {1..40}; do echo "        server 127.0.0.1:9101;"; done)
@@ -323,13 +334,11 @@ $(for _ in {1..40}; do echo "        server 127.0.0.1:9101;"; done)
         listen 127.0.0.1:18990;
         location / { proxy_pass http://many; health_check interval=1s uri=/health; }
     }
-}
 EOF
-cx "nginx -c /tmp/m3/nginx.conf"
 sleep 4
 is "many: server still in use" "$(cx "wget -qO- http://127.0.0.1:18990/ 2>&1")" 9101
-is "many: no probe failed for lack of connections" "$(cx "grep -c 'is unhealthy' /tmp/m3/error.log")" 0
-cx "nginx -c /tmp/m3/nginx.conf -s quit"
+is "many: no probe failed for lack of connections" "$(cx "grep -c 'is unhealthy' /tmp/many/error.log")" 0
+cx "nginx -c /tmp/many/nginx.conf -s quit"
 
 # --- configuration errors ---------------------------------------------------------
 
