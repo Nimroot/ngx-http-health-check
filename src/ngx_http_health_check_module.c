@@ -2,7 +2,7 @@
  * Copyright (C) 2026 The ngx_http_health_check authors
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Active health checks for nginx upstream groups, configured with the
+ * Active health checks for upstream groups in shared memory: the
  * health_check and match directives.
  *
  *     upstream backend {
@@ -13,7 +13,6 @@
  *
  *     match ok {
  *         status 200;
- *         header Content-Type = text/plain;
  *         body ~ "^ok";
  *     }
  *
@@ -22,31 +21,8 @@
  *         health_check interval=5s uri=/health match=ok;
  *     }
  *
- * Supported: the interval=, uri= and match= parameters of health_check, and
- * the status, header and body tests of match. Other parameters and the
- * "require" test are rejected at configuration time.
- *
- * How it works: health_check needs the upstream to have a "zone", so its
- * servers live in shared memory and are seen by every worker. Worker 0 sends
- * "GET <uri> HTTP/1.x" (proxy_http_version: 1.0, or 1.1 for 1.1 and 2) to
- * every server of the group every interval and sets the server's "down"
- * flag from the result, which every load-balancing
- * method already honours; it keeps the group's count of usable servers
- * (peers->tries) in step, as nginx does for "down" servers. Servers marked
- * "down" in the configuration are never checked or brought up. Fails and
- * passes are fixed at 1, servers start healthy, and probes use the
- * location's proxy_connect/send/read timeouts and Host $proxy_host; with
- * proxy_pass https://, also its SSL context and proxy_ssl_verify,
- * proxy_ssl_server_name and proxy_ssl_name (no session reuse). At most
- * a quarter of worker_connections probes run at a time; a probe that cannot
- * run for a reason of worker 0's own (no free connection, no memory) leaves
- * the server's state as it was.
- *
- * Source files:
- *
- *     ngx_http_health_check_module.c   directives, configuration, start-up
- *     ngx_http_health_check_match.c    the "match" block and its tests
- *     ngx_http_health_check_probe.c    probing servers, recording health
+ * This file: the directives, and tying each health_check to its location's
+ * group, proxy settings and match block.
  */
 
 
