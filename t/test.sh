@@ -255,11 +255,11 @@ expect "raw: close-delimited body passes"      /raw/ ok
 since=$(date +%s)
 raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 100\r\n\r\nok\n'
 expect "raw: conflicting Content-Length fails" /raw/ 9102
-logged "reason: conflicting Content-Length" 'is unhealthy: conflicting Content-Length'
+logged "reason: second Content-Length" 'is unhealthy: duplicate Content-Length'
 raw 'HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\n'
 expect "raw: 204 needs no body"                /raw/ 204
-raw 'HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Length: 3\r\n\r\nok\n'
-expect "raw: conflicting Content-Length fails (reversed)" /raw/ 9102
+raw 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nok\n'
+expect "raw: repeated Content-Length fails, as for the proxy" /raw/ 9102
 raw "$ok_resp"
 expect "raw: complete response passes again"   /raw/ ok
 since=$(date +%s)

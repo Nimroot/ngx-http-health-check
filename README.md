@@ -142,11 +142,10 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   bytes (or the first 256k of them), with the last chunk of a
   `Transfer-Encoding: chunked` body (in answer to HTTP/1.1; `match` sees the
   decoded data), or when the server closes the connection if there is
-  neither. As with nginx's proxy, a connection closed early,
-  `Content-Length` headers with different values, `Content-Length` with
-  `Transfer-Encoding`, a transfer coding other than `chunked` alone, an
-  invalid chunk, or a header line with space before its colon fail the
-  check.
+  neither. As with nginx's proxy, a connection closed early, a second
+  `Content-Length` or `Transfer-Encoding`, both together, a transfer coding
+  other than `chunked` alone, an invalid chunk, or a header line with space
+  before its colon fail the check.
 - At most a quarter of `worker_connections` probes run at once; the others
   wait for their turn. A probe that worker 0 cannot carry out for a reason
   of its own (no free connection, out of memory) leaves the server's state

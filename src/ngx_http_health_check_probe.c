@@ -773,10 +773,9 @@ ngx_http_hc_dummy(ngx_event_t *ev)
  * its header says (RFC 9112, 6.3). Any other body is delimited by
  * Content-Length, by "Transfer-Encoding: chunked" in answer to an HTTP/1.1
  * request, or by the end of the connection. As for nginx's proxy, any other
- * transfer coding, a second Transfer-Encoding, or one with Content-Length
- * is an error; so are several different Content-Length values, or a field
- * name the server may have meant as Content-Length but isn't, which make
- * the length ambiguous.
+ * transfer coding, a second Content-Length or Transfer-Encoding, or both
+ * together are an error; so is a field name the server may have meant as
+ * Content-Length but isn't, which makes the length ambiguous.
  */
 
 static ngx_int_t
@@ -902,14 +901,14 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
                                sizeof("Content-Length") - 1)
                == 0)
         {
-            len = ngx_atoof(v, end - v);
-            if (len == NGX_ERROR) {
-                probe->error = "invalid Content-Length";
+            if (probe->content_length >= 0) {
+                probe->error = "duplicate Content-Length";
                 return NGX_ERROR;
             }
 
-            if (probe->content_length >= 0 && probe->content_length != len) {
-                probe->error = "conflicting Content-Length";
+            len = ngx_atoof(v, end - v);
+            if (len == NGX_ERROR) {
+                probe->error = "invalid Content-Length";
                 return NGX_ERROR;
             }
 
@@ -922,8 +921,12 @@ ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
                                sizeof("Transfer-Encoding") - 1)
                == 0)
         {
+            if (probe->chunked) {
+                probe->error = "duplicate Transfer-Encoding";
+                return NGX_ERROR;
+            }
+
             if (!probe->check->http11
-                || probe->chunked
                 || end - v != sizeof("chunked") - 1
                 || ngx_strncasecmp(v, (u_char *) "chunked",
                                    sizeof("chunked") - 1)
