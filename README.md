@@ -137,16 +137,15 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 - Servers marked `down` in the configuration are never checked or brought up.
   That includes servers added by `resolve`, also from SRV records
   (`service=`), whose names are those of the records' targets.
-- The response header must fit in `proxy_buffer_size`, as for requests.
-- A response passes only if it is complete: a response with status 1xx, 204
-  or 304 ends with its header; any other body ends after `Content-Length`
-  bytes (or the first 256k of them), with the last chunk of a
-  `Transfer-Encoding: chunked` body (`match` sees the decoded data), or when
-  the server closes the connection if there is neither. As with nginx's
-  proxy, a connection closed early, a second `Content-Length` or
-  `Transfer-Encoding`, both together, a transfer coding other than `chunked`
-  alone, an invalid chunk, or a header line with space before its colon fail
-  the check.
+- The response is read with nginx's own parsers, by the rules of its proxy:
+  - the header must fit in `proxy_buffer_size`;
+  - a response with status 1xx, 204 or 304 ends with its header; any other
+    body ends after `Content-Length` bytes (or the first 256k of them), with
+    the last chunk of a `chunked` body (`match` sees the decoded data), or
+    when the server closes the connection if there is neither;
+  - a connection closed early, a second `Content-Length` or
+    `Transfer-Encoding`, both together, a transfer coding other than
+    `chunked`, an invalid chunk or an invalid header line fail the check.
 - At most a quarter of `worker_connections` probes run at once; the others
   wait for their turn. A probe that worker 0 cannot carry out for a reason
   of its own (no free connection, out of memory) leaves the server's state
@@ -196,9 +195,10 @@ not from testing against NGINX Plus.
 | File | |
 |---|---|
 | `config` | nginx build script for `--add-module` / `--add-dynamic-module` |
-| `src/ngx_http_health_check_module.c` | module definition, `health_check` directive, configuration checks |
+| `src/ngx_http_health_check_module.c` | module definition, `health_check` directive, tying checks to their location's group and proxy settings |
 | `src/ngx_http_health_check_match.c` | `match` block: parsing its tests and running them against a response |
-| `src/ngx_http_health_check_probe.c` | starting checks in worker 0, probing servers (connect, send, read, parse) and recording their health |
+| `src/ngx_http_health_check_probe.c` | scheduling checks in worker 0, connecting, TLS, sending, recording the result |
+| `src/ngx_http_health_check_response.c` | reading and parsing a response with nginx's parsers |
 | `src/ngx_http_health_check.h` | types shared by the source files |
 | `t/` | test container and black-box tests (see below) |
 

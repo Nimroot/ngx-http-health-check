@@ -7,6 +7,7 @@ ngx_module_deps="$ngx_addon_dir/src/ngx_http_health_check.h"
 ngx_module_srcs="\
   $ngx_addon_dir/src/ngx_http_health_check_module.c \
   $ngx_addon_dir/src/ngx_http_health_check_match.c \
-  $ngx_addon_dir/src/ngx_http_health_check_probe.c"
+  $ngx_addon_dir/src/ngx_http_health_check_probe.c \
+  $ngx_addon_dir/src/ngx_http_health_check_response.c"
 
 . auto/module

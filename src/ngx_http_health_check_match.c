@@ -200,6 +200,7 @@ ngx_http_hc_match_test(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
         }
 
         t->type = NGX_HTTP_HC_BODY;
+        match->body = 1;
 
         return ngx_http_hc_test_op(cf, t, &value[1], &value[2]);
     }
@@ -293,14 +294,16 @@ ngx_http_hc_match_find(ngx_http_hc_main_conf_t *hmcf, ngx_str_t *name)
  */
 
 u_char *
-ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_uint_t code,
-    ngx_array_t *headers, ngx_str_t *body, u_char *buf, size_t len)
+ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_http_hc_response_t *resp,
+    u_char *buf, size_t len)
 {
     u_char               *last;
-    ngx_uint_t            i, j, pass;
+    ngx_uint_t            i, j, code, pass;
     ngx_keyval_t         *h;
     ngx_http_hc_test_t   *t;
     ngx_http_hc_range_t  *range;
+
+    code = resp->status.code;
 
     if (match == NULL) {
         if (code >= 200 && code < 400) {
@@ -315,7 +318,7 @@ ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_uint_t code,
     }
 
     t = match->tests.elts;
-    h = headers->elts;
+    h = resp->headers.elts;
 
     for (i = 0; i < match->tests.nelts; i++) {
 
@@ -338,7 +341,7 @@ ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_uint_t code,
 
             /* "header name != value": one with another value */
 
-            for (j = 0; j < headers->nelts && !pass; j++) {
+            for (j = 0; j < resp->headers.nelts && !pass; j++) {
                 pass = (h[j].key.len == t[i].name.len
                         && ngx_strncasecmp(h[j].key.data, t[i].name.data,
                                            t[i].name.len) == 0
@@ -353,7 +356,7 @@ ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_uint_t code,
             break;
 
         case NGX_HTTP_HC_BODY:
-            pass = ngx_http_hc_passes(&t[i], body);
+            pass = ngx_http_hc_passes(&t[i], &resp->body);
             break;
         }
 

@@ -4,16 +4,12 @@
  *
  * Probing the servers of a group and recording their health: worker 0
  * connects to each server (and does the SSL handshake for https), sends the
- * check request, reads and parses the response, has it judged by the match
- * tests, and sets the server's "down" flag in shared memory.
+ * check request, reads the response, has it judged by the match tests, and
+ * sets the server's "down" flag in shared memory.
  */
 
 
 #include "ngx_http_health_check.h"
-
-
-#define NGX_HTTP_HC_BODY_MAX    (256 * 1024)
-#define NGX_HTTP_HC_BUF_INIT    4096
 
 
 typedef struct ngx_http_hc_probe_s  ngx_http_hc_probe_t;
@@ -27,22 +23,12 @@ struct ngx_http_hc_probe_s {
     socklen_t                           socklen;
     ngx_str_t                           name;
     u_char                             *sent;
-
-    ngx_buf_t                           buf;
-    ngx_uint_t                          status;
-    size_t                              header_len;
-    off_t                               content_length;
-    /* ngx_keyval_t */
-    ngx_array_t                        *headers;
-    /* why ngx_http_hc_parse() rejected the response */
-    const char                         *error;
+    ngx_http_hc_response_t              resp;
 
     /* in the round's list, then in the waiting queue */
     ngx_queue_t                         queue;
 
     unsigned                            started:1;
-    unsigned                            bodyless:1;
-    unsigned                            chunked:1;
 };
 
 
@@ -69,11 +55,6 @@ static void ngx_http_hc_ssl_handshaked(ngx_connection_t *c);
 static void ngx_http_hc_send(ngx_event_t *wev);
 static void ngx_http_hc_recv(ngx_event_t *rev);
 static void ngx_http_hc_dummy(ngx_event_t *ev);
-static ngx_int_t ngx_http_hc_parse(ngx_http_hc_probe_t *probe,
-    ngx_uint_t store);
-static ngx_int_t ngx_http_hc_dechunk(ngx_http_hc_probe_t *probe, u_char *out,
-    size_t *len);
-static void ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe);
 static void ngx_http_hc_finish(ngx_http_hc_probe_t *probe,
     const char *reason);
 static void ngx_http_hc_abort(ngx_http_hc_probe_t *probe,
@@ -400,6 +381,14 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
 
     probe->sent = check->request.data;
 
+    if (ngx_http_hc_response_init(&probe->resp, c, check->conf->buffer_size,
+                                  check->match && check->match->body)
+        != NGX_OK)
+    {
+        ngx_http_hc_abort(probe, "out of memory");
+        return;
+    }
+
     /* for https, the SSL handshake must be done within it too */
     ngx_add_timer(c->write, check->conf->connect_timeout);
 
@@ -625,570 +614,50 @@ ngx_http_hc_send(ngx_event_t *wev)
 static void
 ngx_http_hc_recv(ngx_event_t *rev)
 {
-    u_char               *p;
-    size_t                size, body, max;
-    ssize_t               n;
-    ngx_buf_t            *b;
+    u_char                reason[NGX_MAX_ERROR_STR];
     ngx_int_t             rc;
     ngx_connection_t     *c;
-    ngx_http_hc_probe_t  *probe;
+    ngx_http_hc_probe_t  *p;
 
     c = rev->data;
-    probe = c->data;
-    b = &probe->buf;
-
-    /* the header, and the part of the body that is examined */
-    max = probe->check->conf->buffer_size + NGX_HTTP_HC_BODY_MAX;
+    p = c->data;
 
     if (rev->timedout) {
-        ngx_http_hc_finish(probe, "timed out reading the response");
+        ngx_http_hc_finish(p, "timed out reading the response");
         return;
     }
 
-    if (b->start == NULL) {
-        b->start = ngx_palloc(probe->pool, NGX_HTTP_HC_BUF_INIT);
-        if (b->start == NULL) {
-            ngx_http_hc_abort(probe, "out of memory");
-            return;
+    rc = ngx_http_hc_response_recv(&p->resp, c);
+
+    if (rc == NGX_AGAIN) {
+        ngx_add_timer(rev, p->check->conf->read_timeout);
+
+        if (ngx_handle_read_event(rev, 0) != NGX_OK) {
+            ngx_http_hc_abort(p, "cannot handle events");
         }
 
-        b->pos = b->start;
-        b->last = b->start;
-        b->end = b->start + NGX_HTTP_HC_BUF_INIT;
+        return;
     }
 
-    for ( ;; ) {
-
-        if (b->last == b->end) {
-            size = b->end - b->start;
-
-            if (size >= max) {
-                /*
-                 * Only the first 256k of the body are examined. The header
-                 * is at most proxy_buffer_size, so the buffer holds at least
-                 * that much.
-                 */
-                ngx_http_hc_evaluate(probe);
-                return;
-            }
-
-            size = ngx_min(size * 2, max);
-
-            p = ngx_palloc(probe->pool, size);
-            if (p == NULL) {
-                ngx_http_hc_abort(probe, "out of memory");
-                return;
-            }
-
-            b->last = ngx_cpymem(p, b->start, b->last - b->start);
-            b->start = p;
-            b->pos = p;
-            b->end = p + size;
-        }
-
-        n = c->recv(c, b->last, b->end - b->last);
-
-        if (n == NGX_AGAIN) {
-            ngx_add_timer(rev, probe->check->conf->read_timeout);
-
-            if (ngx_handle_read_event(rev, 0) != NGX_OK) {
-                ngx_http_hc_abort(probe, "cannot handle events");
-            }
-
-            return;
-        }
-
-        if (n == NGX_ERROR) {
-            ngx_http_hc_finish(probe, "recv() failed");
-            return;
-        }
-
-        if (n == 0) {
-            /* evaluate() rejects a body shorter than its Content-Length */
-            ngx_http_hc_evaluate(probe);
-            return;
-        }
-
-        b->last += n;
-
-        /*
-         * Done early once the header is complete for a response without
-         * a body, or once Content-Length says the body is complete (or
-         * at least 256k of it are here). Otherwise the body ends when the
-         * server closes the connection.
-         */
-
-        rc = ngx_http_hc_parse(probe, 0);
-
-        if (rc == NGX_ERROR) {
-            ngx_http_hc_finish(probe, probe->error);
-            return;
-        }
-
-        if (rc == NGX_OK && probe->chunked && !probe->bodyless) {
-            rc = ngx_http_hc_dechunk(probe, NULL, &body);
-
-            if (rc == NGX_ERROR) {
-                ngx_http_hc_finish(probe, probe->error);
-                return;
-            }
-
-            if (rc == NGX_OK) {
-                ngx_http_hc_evaluate(probe);
-                return;
-            }
-
-            continue;
-        }
-
-        if (rc == NGX_OK) {
-            body = b->last - b->start - probe->header_len;
-
-            if (probe->bodyless
-                || (probe->content_length >= 0
-                    && (off_t) body
-                       >= ngx_min(probe->content_length,
-                                  NGX_HTTP_HC_BODY_MAX)))
-            {
-                ngx_http_hc_evaluate(probe);
-                return;
-            }
-        }
+    if (rc == NGX_DECLINED) {
+        ngx_http_hc_finish(p, p->resp.error);
+        return;
     }
+
+    if (rc == NGX_ERROR) {
+        ngx_http_hc_abort(p, "out of memory");
+        return;
+    }
+
+    ngx_http_hc_finish(p, (char *) ngx_http_hc_match(p->check->match,
+                                                     &p->resp, reason,
+                                                     sizeof(reason)));
 }
 
 
 static void
 ngx_http_hc_dummy(ngx_event_t *ev)
 {
-}
-
-
-/*
- * Parses the status line and header from the buffer. NGX_AGAIN until the
- * empty line ending the header has arrived, NGX_ERROR (with probe->error)
- * for a response that is invalid or whose body can't be delimited, NGX_ABORT
- * if out of memory. With "store", also collects the header lines (pointing
- * into the buffer, so only once reading is over).
- *
- * The body of a response with status 1xx, 204 or 304 is empty, whatever
- * its header says (RFC 9112, 6.3). Any other body is delimited by
- * Content-Length, by "Transfer-Encoding: chunked", or by the end of the
- * connection. As for nginx's proxy, any other
- * transfer coding, a second Content-Length or Transfer-Encoding, or both
- * together are an error; so is a field name the server may have meant as
- * Content-Length but isn't, which makes the length ambiguous.
- */
-
-static ngx_int_t
-ngx_http_hc_parse(ngx_http_hc_probe_t *probe, ngx_uint_t store)
-{
-    off_t          len;
-    size_t         max;
-    u_char        *p, *q, *line, *end, *nl, *colon, *v;
-    ngx_buf_t     *b;
-    ngx_uint_t     first;
-    ngx_keyval_t  *h;
-
-    b = &probe->buf;
-    p = b->start;
-    first = 1;
-
-    /* the header must fit in proxy_buffer_size, as for requests */
-    max = probe->check->conf->buffer_size;
-
-    probe->content_length = -1;
-    probe->bodyless = 0;
-    probe->chunked = 0;
-    probe->error = "invalid response header";
-
-    if (store) {
-        probe->headers = ngx_array_create(probe->pool, 8,
-                                          sizeof(ngx_keyval_t));
-        if (probe->headers == NULL) {
-            return NGX_ABORT;
-        }
-    }
-
-    /* a TLS record (alert, handshake...): http:// to an https server */
-
-    if (b->last > b->start && *b->start >= 0x14 && *b->start <= 0x17) {
-        probe->error = "TLS data instead of an HTTP response "
-                       "(an https server?)";
-        return NGX_ERROR;
-    }
-
-    for ( ;; ) {
-        nl = ngx_strlchr(p, b->last, LF);
-
-        if (nl == NULL) {
-            if ((size_t) (b->last - b->start) >= max) {
-                goto too_large;
-            }
-
-            return NGX_AGAIN;
-        }
-
-        if ((size_t) (nl + 1 - b->start) > max) {
-            goto too_large;
-        }
-
-        line = p;
-        end = (nl > line && nl[-1] == CR) ? nl - 1 : nl;
-        p = nl + 1;
-
-        if (first) {
-            /* HTTP/1.x SSS ... */
-            if (end - line < 12 || ngx_strncmp(line, "HTTP/", 5) != 0
-                || line[8] != ' ')
-            {
-                probe->error = "invalid status line";
-                return NGX_ERROR;
-            }
-
-            if (line[9] < '1' || line[9] > '5'
-                || line[10] < '0' || line[10] > '9'
-                || line[11] < '0' || line[11] > '9')
-            {
-                probe->error = "invalid status line";
-                return NGX_ERROR;
-            }
-
-            probe->status = (line[9] - '0') * 100 + (line[10] - '0') * 10
-                            + (line[11] - '0');
-
-            probe->bodyless = (probe->status < 200 || probe->status == 204
-                               || probe->status == 304);
-
-            first = 0;
-            continue;
-        }
-
-        if (end == line) {
-            if (probe->chunked && probe->content_length >= 0) {
-                probe->error = "both Content-Length and Transfer-Encoding";
-                return NGX_ERROR;
-            }
-
-            probe->header_len = p - b->start;
-            probe->error = NULL;
-            return NGX_OK;
-        }
-
-        /* "Name: value"; no continuation lines or space before the colon */
-
-        colon = ngx_strlchr(line, end, ':');
-        if (colon == NULL || colon == line) {
-            return NGX_ERROR;
-        }
-
-        for (q = line; q < colon; q++) {
-            if (*q <= ' ' || *q == 0x7f) {
-                return NGX_ERROR;
-            }
-        }
-
-        v = colon + 1;
-        while (v < end && (*v == ' ' || *v == '\t')) {
-            v++;
-        }
-
-        while (end > v && (end[-1] == ' ' || end[-1] == '\t')) {
-            end--;
-        }
-
-        /* framing of a body, if the response has one */
-
-        if (!probe->bodyless
-            && colon - line == sizeof("Content-Length") - 1
-            && ngx_strncasecmp(line, (u_char *) "Content-Length",
-                               sizeof("Content-Length") - 1)
-               == 0)
-        {
-            if (probe->content_length >= 0) {
-                probe->error = "duplicate Content-Length";
-                return NGX_ERROR;
-            }
-
-            len = ngx_atoof(v, end - v);
-            if (len == NGX_ERROR) {
-                probe->error = "invalid Content-Length";
-                return NGX_ERROR;
-            }
-
-            probe->content_length = len;
-        }
-
-        if (!probe->bodyless
-            && colon - line == sizeof("Transfer-Encoding") - 1
-            && ngx_strncasecmp(line, (u_char *) "Transfer-Encoding",
-                               sizeof("Transfer-Encoding") - 1)
-               == 0)
-        {
-            if (probe->chunked) {
-                probe->error = "duplicate Transfer-Encoding";
-                return NGX_ERROR;
-            }
-
-            if (end - v != sizeof("chunked") - 1
-                || ngx_strncasecmp(v, (u_char *) "chunked",
-                                   sizeof("chunked") - 1)
-                   != 0)
-            {
-                probe->error = "unsupported Transfer-Encoding";
-                return NGX_ERROR;
-            }
-
-            probe->chunked = 1;
-        }
-
-        if (store) {
-            h = ngx_array_push(probe->headers);
-            if (h == NULL) {
-                return NGX_ABORT;
-            }
-
-            h->key.data = line;
-            h->key.len = colon - line;
-            h->value.data = v;
-            h->value.len = end - v;
-        }
-    }
-
-too_large:
-
-    probe->error = "response header too large";
-    return NGX_ERROR;
-}
-
-
-/*
- * Decodes the chunked body that follows the header (RFC 9112, 7.1). NGX_OK
- * once the last chunk and the trailer section have arrived, or once
- * NGX_HTTP_HC_BODY_MAX bytes of data have; NGX_AGAIN until then;
- * NGX_ERROR (with probe->error) if the body is invalid. Sets *len to the
- * bytes of data decoded, at most NGX_HTTP_HC_BODY_MAX, and copies
- * them to "out" unless it's NULL. Chunk extensions and trailer fields are
- * skipped.
- */
-
-static ngx_int_t
-ngx_http_hc_dechunk(ngx_http_hc_probe_t *probe, u_char *out, size_t *len)
-{
-    off_t       size;
-    size_t      n, total;
-    u_char     *p, *q, *nl, *last, c;
-    ngx_buf_t  *b;
-
-    b = &probe->buf;
-    p = b->start + probe->header_len;
-    last = b->last;
-    total = 0;
-
-    probe->error = "invalid chunked body";
-
-    for ( ;; ) {
-
-        /* chunk-size [ chunk-ext ] CRLF */
-
-        nl = ngx_strlchr(p, last, LF);
-
-        if (nl == NULL) {
-            if (last - p > 1024) {
-                return NGX_ERROR;
-            }
-
-            goto again;
-        }
-
-        size = 0;
-
-        for (q = p; q < nl; q++) {
-            c = (u_char) (*q | 0x20);
-
-            if (*q >= '0' && *q <= '9') {
-                c = *q - '0';
-
-            } else if (c >= 'a' && c <= 'f') {
-                c = c - 'a' + 10;
-
-            } else {
-                break;
-            }
-
-            if (size > (NGX_MAX_OFF_T_VALUE - 15) / 16) {
-                return NGX_ERROR;
-            }
-
-            size = size * 16 + c;
-        }
-
-        if (q == p
-            || (q < nl && *q != ';' && *q != ' ' && *q != '\t'
-                && !(*q == CR && q + 1 == nl)))
-        {
-            return NGX_ERROR;
-        }
-
-        p = nl + 1;
-
-        if (size == 0) {
-            break;
-        }
-
-        /* chunk-data */
-
-        n = (size_t) ngx_min(size, last - p);
-        n = ngx_min(n, NGX_HTTP_HC_BODY_MAX - total);
-
-        if (out) {
-            ngx_memcpy(out + total, p, n);
-        }
-
-        total += n;
-
-        if (total == NGX_HTTP_HC_BODY_MAX) {
-            *len = total;
-            return NGX_OK;
-        }
-
-        if (last - p < size) {
-            goto again;
-        }
-
-        p += size;
-
-        /* CRLF */
-
-        if (p < last && *p == CR) {
-            p++;
-        }
-
-        if (p == last) {
-            goto again;
-        }
-
-        if (*p++ != LF) {
-            return NGX_ERROR;
-        }
-    }
-
-    /* trailer section, up to an empty line */
-
-    for ( ;; ) {
-        nl = ngx_strlchr(p, last, LF);
-
-        if (nl == NULL) {
-            goto again;
-        }
-
-        if (nl == p || (nl == p + 1 && *p == CR)) {
-            *len = total;
-            probe->error = NULL;
-            return NGX_OK;
-        }
-
-        p = nl + 1;
-    }
-
-again:
-
-    *len = total;
-    return NGX_AGAIN;
-}
-
-
-/* The response is complete (or 256k of body): judge it. */
-
-static void
-ngx_http_hc_evaluate(ngx_http_hc_probe_t *probe)
-{
-    u_char      reason[NGX_MAX_ERROR_STR];
-    size_t      len;
-    ngx_str_t   body;
-    ngx_int_t   rc;
-
-    rc = ngx_http_hc_parse(probe, 1);
-
-    if (rc == NGX_ABORT) {
-        ngx_http_hc_abort(probe, "out of memory");
-        return;
-    }
-
-    if (rc == NGX_AGAIN) {
-        ngx_http_hc_finish(probe,
-                           probe->buf.last == probe->buf.start
-                           ? "connection closed without a response"
-                           : "incomplete response header");
-        return;
-    }
-
-    if (rc == NGX_ERROR) {
-        ngx_http_hc_finish(probe, probe->error);
-        return;
-    }
-
-    body.data = probe->buf.start + probe->header_len;
-    len = probe->buf.last - body.data;
-
-    if (probe->bodyless) {
-        len = 0;
-
-    } else if (probe->chunked) {
-
-        body.data = ngx_pnalloc(probe->pool,
-                                ngx_min(len, NGX_HTTP_HC_BODY_MAX));
-        if (body.data == NULL) {
-            ngx_http_hc_abort(probe, "out of memory");
-            return;
-        }
-
-        rc = ngx_http_hc_dechunk(probe, body.data, &len);
-
-        if (rc == NGX_ERROR) {
-            ngx_http_hc_finish(probe, probe->error);
-            return;
-        }
-
-        /*
-         * Incomplete: the connection was closed, or the buffer is full of
-         * chunks too small to have made the first 256k of data; those are
-         * judged as they are.
-         */
-
-        if (rc == NGX_AGAIN
-            && (size_t) (probe->buf.last - probe->buf.start)
-               < probe->check->conf->buffer_size + NGX_HTTP_HC_BODY_MAX)
-        {
-            ngx_http_hc_finish(probe, "connection closed before the response "
-                                      "body was complete");
-            return;
-        }
-
-    } else if (probe->content_length >= 0) {
-
-        if ((off_t) len > probe->content_length) {
-            len = (size_t) probe->content_length;
-        }
-
-        /* reading stops early only once enough of the body is here */
-
-        if ((off_t) len < ngx_min(probe->content_length,
-                                  NGX_HTTP_HC_BODY_MAX))
-        {
-            ngx_http_hc_finish(probe, "connection closed before the response "
-                                      "body was complete");
-            return;
-        }
-    }
-
-    body.len = ngx_min(len, NGX_HTTP_HC_BODY_MAX);
-
-    ngx_http_hc_finish(probe,
-                       (char *) ngx_http_hc_match(probe->check->match,
-                                                  probe->status,
-                                                  probe->headers, &body,
-                                                  reason, sizeof(reason)));
 }
 
 

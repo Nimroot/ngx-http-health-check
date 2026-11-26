@@ -7,6 +7,7 @@
  *     ngx_http_health_check_module.c     directives, configuration
  *     ngx_http_health_check_match.c      match blocks and their tests
  *     ngx_http_health_check_probe.c      probing servers, recording health
+ *     ngx_http_health_check_response.c   reading and parsing a response
  */
 
 
@@ -32,9 +33,13 @@
 #endif
 
 
+#define NGX_HTTP_HC_BODY_MAX    (256 * 1024)     /* body bytes examined */
+
+
 typedef struct {
     ngx_str_t                       name;
     ngx_array_t                     tests;       /* ngx_http_hc_test_t */
+    ngx_uint_t                      body;        /* has body tests */
 } ngx_http_hc_match_t;
 
 
@@ -99,6 +104,26 @@ typedef struct {
 } ngx_http_hc_main_conf_t;
 
 
+/* The response to a probe, as it is read. */
+
+typedef struct {
+    ngx_pool_t                     *pool;
+    ngx_http_request_t             *r;           /* nginx's parsers' state */
+    ngx_buf_t                       buf;
+    ngx_uint_t                      phase;
+    ngx_http_status_t               status;
+    ngx_array_t                     headers;     /* ngx_keyval_t */
+    off_t                           content_length;
+    ngx_http_chunked_t              chunk;
+    off_t                           length;      /* body bytes so far */
+    ngx_str_t                       body;        /* kept for body tests */
+    size_t                          body_size;
+    const char                     *error;       /* why it is rejected */
+    unsigned                        chunked:1;
+    unsigned                        keep_body:1;
+} ngx_http_hc_response_t;
+
+
 extern ngx_module_t  ngx_http_health_check_module;
 
 
@@ -106,8 +131,13 @@ char *ngx_http_hc_match_block(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 ngx_http_hc_match_t *ngx_http_hc_match_find(ngx_http_hc_main_conf_t *hmcf,
     ngx_str_t *name);
-u_char *ngx_http_hc_match(ngx_http_hc_match_t *match, ngx_uint_t code,
-    ngx_array_t *headers, ngx_str_t *body, u_char *buf, size_t len);
+u_char *ngx_http_hc_match(ngx_http_hc_match_t *match,
+    ngx_http_hc_response_t *resp, u_char *buf, size_t len);
+
+ngx_int_t ngx_http_hc_response_init(ngx_http_hc_response_t *resp,
+    ngx_connection_t *c, size_t size, ngx_uint_t keep_body);
+ngx_int_t ngx_http_hc_response_recv(ngx_http_hc_response_t *resp,
+    ngx_connection_t *c);
 
 ngx_int_t ngx_http_hc_init_process(ngx_cycle_t *cycle);
 
