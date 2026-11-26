@@ -210,7 +210,8 @@ starts it, and runs `t/test.sh`, which takes backends down and up and checks
 where requests go:
 
 - unhealthy servers are taken out and come back; `uri=` and `match=` (status,
-  header and body tests) decide health; the default URI is `/`;
+  header and body tests, negated or not) decide health; the default URI is
+  `/`;
 - groups without `health_check` and servers that are `down` in the
   configuration are left alone; with no healthy server, requests get 502;
 - `proxy_next_upstream` counts only healthy servers;

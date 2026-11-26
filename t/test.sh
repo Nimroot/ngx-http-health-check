@@ -116,6 +116,7 @@ echo "all healthy"
 set_state
 expect "default: both servers"                 /default/   9101,9102
 expect "match: both servers"                   /match/     9101,9102
+expect "neg: both servers"                     /neg/       9101,9102
 expect "root: both servers"                    /root/      9101,9102
 now    "admin: 9101 is down by config"         /admin/     9102
 now    "unchecked: both servers"               /unchecked/ 9101,9102
@@ -125,11 +126,14 @@ echo "9101 /health -> 503"
 since=$(date +%s); set_state "touch /tmp/hc/9101.fail"
 expect "default: 9101 taken out"               /default/   9102
 expect "match: 9101 taken out"                 /match/     9102
+expect "neg: status ! 500-599 takes 9101 out"  /neg/       9102
 now    "root: uri=/ still passes, both"        /root/      9101,9102
 now    "unchecked: untouched, both"            /unchecked/ 9101,9102
 attempts "flaky: unhealthy server not counted" /flaky/default/ "503 503"
 logged "warn names peer, upstream, reason" \
        'peer 127.0.0.1:9101 in upstream "hc_default" is unhealthy: status 503 is not 2xx or 3xx'
+logged "reason names the failed status test" \
+       'upstream "hc_neg" is unhealthy: status 503 fails "status ! 500-599"'
 
 echo "9101 recovers"
 since=$(date +%s); set_state
@@ -139,17 +143,20 @@ now    "admin: config-down 9101 stays down"    /admin/     9102
 attempts "flaky: counted again"                /flaky/default/ "503 503, 503"
 logged "notice when healthy again" 'peer 127.0.0.1:9101 in upstream "hc_default" is healthy'
 
-echo "9101 /health -> 200 \"degraded\" (fails body ~ \"^ok\")"
+echo "9101 /health -> 200 \"degraded\""
 since=$(date +%s); set_state "touch /tmp/hc/9101.degraded"
-expect "match: 9101 taken out"                 /match/     9102
+expect "match: body ~ ^ok fails, 9101 out"     /match/     9102
+expect "neg: body !~ degraded fails, 9101 out" /neg/       9102
 now    "default: 2xx passes without match"     /default/   9101,9102
 logged "reason names the failed test" 'response fails "body ~ ^ok"'
 
-echo "9101 /health -> 200 text/html (fails header Content-Type = text/plain)"
+echo "9101 /health -> 200 text/html"
 set_state
 expect "match: 9101 healthy first"             /match/     9101,9102
+expect "neg: 9101 healthy first"               /neg/       9101,9102
 since=$(date +%s); set_state "touch /tmp/hc/9101.html"
-expect "match: 9101 taken out"                 /match/     9102
+expect "match: header = text/plain fails"      /match/     9102
+expect "neg: header != text/html fails"        /neg/       9102
 now    "default: both servers"                 /default/   9101,9102
 logged "reason names the failed test" 'response fails "header Content-Type = text/plain"'
 
@@ -399,6 +406,10 @@ conf_test "match: require not supported"            '"require" in "match" is not
     'match r { require $host; }'
 conf_test "match: invalid status"                   'invalid status "600"' \
     'match r { status 600; }'
+conf_test "match: invalid operator"                 'invalid operator "=="' \
+    'match r { header X == y; }'
+conf_test "match: no = for the body"                'invalid operator "="' \
+    'match r { body = y; }'
 conf_test "match: invalid regex"                    'pcre2_compile() failed' \
     'match r { body ~ "("; }'
 conf_test "match: duplicate name"                   'duplicate match "m"' \
