@@ -12,24 +12,19 @@
 #include "ngx_http_health_check.h"
 
 
-typedef struct ngx_http_hc_probe_s  ngx_http_hc_probe_t;
-
 /* One check of one server, in its own pool. */
-struct ngx_http_hc_probe_s {
-    ngx_http_hc_t                       *check;
-    ngx_pool_t                         *pool;
-    ngx_peer_connection_t               pc;
-    struct sockaddr                    *sockaddr;
-    socklen_t                           socklen;
-    ngx_str_t                           name;
-    u_char                             *sent;
-    ngx_http_hc_response_t              resp;
 
-    /* in the round's list, then in the waiting queue */
-    ngx_queue_t                         queue;
-
-    unsigned                            started:1;
-};
+typedef struct {
+    ngx_queue_t                     queue;       /* in a round, waiting */
+    ngx_http_hc_t                  *check;
+    ngx_http_upstream_rr_peers_t   *peers;
+    ngx_http_upstream_rr_peer_t    *peer;
+    ngx_pool_t                     *pool;
+    ngx_peer_connection_t           pc;
+    u_char                         *sent;
+    ngx_http_hc_response_t          resp;
+    unsigned                        started:1;
+} ngx_http_hc_probe_t;
 
 
 /*
@@ -54,10 +49,8 @@ static void ngx_http_hc_ssl_handshaked(ngx_connection_t *c);
 static void ngx_http_hc_send(ngx_event_t *wev);
 static void ngx_http_hc_recv(ngx_event_t *rev);
 static void ngx_http_hc_dummy(ngx_event_t *ev);
-static void ngx_http_hc_finish(ngx_http_hc_probe_t *probe,
-    const char *reason);
-static void ngx_http_hc_abort(ngx_http_hc_probe_t *probe,
-    const char *reason);
+static void ngx_http_hc_finish(ngx_http_hc_probe_t *p, const char *reason);
+static void ngx_http_hc_abort(ngx_http_hc_probe_t *p, const char *reason);
 static void ngx_http_hc_close(ngx_http_hc_probe_t *probe);
 
 
@@ -145,18 +138,12 @@ ngx_http_hc_run(ngx_event_t *ev)
 
             probe->pool = pool;
             probe->check = check;
-            probe->socklen = peer->socklen;
-            probe->sockaddr = ngx_palloc(pool, peer->socklen);
-            probe->name.len = peer->name.len;
-            probe->name.data = ngx_pnalloc(pool, peer->name.len);
+            probe->peers = peers;
+            probe->peer = peer;
 
-            if (probe->sockaddr == NULL || probe->name.data == NULL) {
-                ngx_destroy_pool(pool);
-                continue;
-            }
-
-            ngx_memcpy(probe->sockaddr, peer->sockaddr, peer->socklen);
-            ngx_memcpy(probe->name.data, peer->name.data, peer->name.len);
+            ngx_http_upstream_rr_peer_lock(peers, peer);
+            ngx_http_upstream_rr_peer_ref(peers, peer);
+            ngx_http_upstream_rr_peer_unlock(peers, peer);
 
             ngx_queue_insert_tail(&list, &probe->queue);
             check->pending++;
@@ -224,9 +211,9 @@ ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
     check = probe->check;
     pc = &probe->pc;
 
-    pc->sockaddr = probe->sockaddr;
-    pc->socklen = probe->socklen;
-    pc->name = &probe->name;
+    pc->sockaddr = probe->peer->sockaddr;
+    pc->socklen = probe->peer->socklen;
+    pc->name = &probe->peer->name;
     pc->get = ngx_event_get_peer;
     pc->log = check->timer.log;
     pc->log_error = NGX_ERROR_INFO;
@@ -537,56 +524,45 @@ ngx_http_hc_dummy(ngx_event_t *ev)
 }
 
 
-/* Records the result (reason == NULL: passed) and frees the probe. */
+/*
+ * The probe went through: records the result in the server, reason NULL
+ * if it passed, logs a change, and frees the probe.
+ */
 
 static void
-ngx_http_hc_finish(ngx_http_hc_probe_t *probe, const char *reason)
+ngx_http_hc_finish(ngx_http_hc_probe_t *p, const char *reason)
 {
-    ngx_uint_t                     was, now, prev, found;
+    ngx_uint_t                     was, now;
     ngx_http_hc_t                 *hc;
     ngx_http_upstream_rr_peer_t   *peer;
     ngx_http_upstream_rr_peers_t  *peers;
 
-    hc = probe->check;
-    found = 0;
-    was = 0;
-    now = 0;
+    hc = p->check;
+    peer = p->peer;
+    peers = p->peers;
 
-    for (peers = hc->uscf->peer.data; peers; peers = peers->next) {
+    ngx_http_upstream_rr_peers_wlock(peers);
 
-        ngx_http_upstream_rr_peers_wlock(peers);
+    was = peer->down;
 
-        for (peer = peers->peer; peer; peer = peer->next) {
+    /* not if "resolve" removed the server meanwhile */
 
-            if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen,
-                                 probe->sockaddr, probe->socklen, 1)
-                != NGX_OK
-                || (peer->down & NGX_HTTP_HC_CONF_DOWN))
-            {
-                continue;
-            }
+    if (!peer->zombie) {
+        peer->down = reason ? (was | hc->bit) : (was & ~hc->bit);
 
-            prev = peer->down;
-            peer->down = reason ? (prev | hc->bit) : (prev & ~hc->bit);
+        /* the servers that aren't down, as nginx counts them */
 
-            /* the servers that aren't down, as nginx counts them */
+        if (was && !peer->down) {
+            peers->tries++;
 
-            if (prev && !peer->down) {
-                peers->tries++;
-
-            } else if (!prev && peer->down) {
-                peers->tries--;
-            }
-
-            if (!found) {
-                was = prev;
-                now = peer->down;
-                found = 1;
-            }
+        } else if (!was && peer->down) {
+            peers->tries--;
         }
-
-        ngx_http_upstream_rr_peers_unlock(peers);
     }
+
+    now = peer->down;
+
+    ngx_http_upstream_rr_peers_unlock(peers);
 
     if (!((was ^ now) & hc->bit)) {
         /* no change */
@@ -595,22 +571,22 @@ ngx_http_hc_finish(ngx_http_hc_probe_t *probe, const char *reason)
         ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
                       "peer %V in upstream \"%V\" is unhealthy: %s "
                       "(health_check in %V:%ui)",
-                      &probe->name, &hc->uscf->host, reason,
+                      &peer->name, &hc->uscf->host, reason,
                       &hc->file, hc->line);
 
     } else if (now & NGX_HTTP_HC_MASK) {
         ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
                       "peer %V in upstream \"%V\" passes health_check "
                       "in %V:%ui, but fails another",
-                      &probe->name, &hc->uscf->host, &hc->file, hc->line);
+                      &peer->name, &hc->uscf->host, &hc->file, hc->line);
 
     } else {
         ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
                       "peer %V in upstream \"%V\" is healthy",
-                      &probe->name, &hc->uscf->host);
+                      &peer->name, &hc->uscf->host);
     }
 
-    ngx_http_hc_close(probe);
+    ngx_http_hc_close(p);
 }
 
 
@@ -621,19 +597,15 @@ ngx_http_hc_finish(ngx_http_hc_probe_t *probe, const char *reason)
  */
 
 static void
-ngx_http_hc_abort(ngx_http_hc_probe_t *probe, const char *reason)
+ngx_http_hc_abort(ngx_http_hc_probe_t *p, const char *reason)
 {
-    ngx_http_hc_t  *check;
-
-    check = probe->check;
-
-    ngx_log_error(NGX_LOG_ERR, check->timer.log, 0,
+    ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
                   "peer %V in upstream \"%V\" not checked, state unchanged: "
                   "%s (health_check in %V:%ui)",
-                  &probe->name, &check->uscf->host, reason,
-                  &check->file, check->line);
+                  &p->peer->name, &p->check->uscf->host, reason,
+                  &p->check->file, p->check->line);
 
-    ngx_http_hc_close(probe);
+    ngx_http_hc_close(p);
 }
 
 
@@ -665,6 +637,17 @@ ngx_http_hc_close(ngx_http_hc_probe_t *probe)
     if (probe->started) {
         ngx_http_hc_active--;
     }
+
+    /* as ngx_http_upstream_free_round_robin_peer() */
+
+    ngx_http_upstream_rr_peers_rlock(probe->peers);
+    ngx_http_upstream_rr_peer_lock(probe->peers, probe->peer);
+
+    if (ngx_http_upstream_rr_peer_unref(probe->peers, probe->peer) == NGX_OK) {
+        ngx_http_upstream_rr_peer_unlock(probe->peers, probe->peer);
+    }
+
+    ngx_http_upstream_rr_peers_unlock(probe->peers);
 
     ngx_destroy_pool(probe->pool);
 

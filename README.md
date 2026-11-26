@@ -125,6 +125,9 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 - Since the state is in shared memory, a new worker 0 (after a crash, for
   instance) carries on from it. A reload starts a new zone: all servers
   start healthy then, as do servers added by `resolve`.
+- A check holds a reference to its server, as a request does, and records
+  its result in that server only; if `resolve` removes the server
+  meanwhile, the result is dropped.
 - Servers marked `down` in the configuration are never checked or brought
   up. That includes servers added by `resolve`, also from SRV records
   (`service=`). A server marked `drain` is checked like any other: while it
