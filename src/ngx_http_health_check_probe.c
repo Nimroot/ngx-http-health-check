@@ -2,44 +2,44 @@
  * Copyright (C) 2026 The ngx_http_health_check authors
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Probing the servers of a group and recording their health: worker 0
- * connects to each server (and does the SSL handshake for https), sends the
- * check request, reads the response, has it judged by the match tests, and
- * sets the server's "down" flag in shared memory.
+ * Probing servers and recording their health, in worker 0.
+ *
+ * Every interval, a check starts a probe for each server of its group
+ * whose last probe is over. A probe connects (with a TLS handshake for
+ * https), sends the request, reads the response, and records the result in
+ * the server's "down" field. At most a quarter of worker_connections probes
+ * have a connection at a time; the others wait.
+ *
+ * A probe holds a reference to its server, as a request does, so that the
+ * server stays in memory if "resolve" removes it meanwhile; the result of
+ * such a probe is dropped.
  */
 
 
 #include "ngx_http_health_check.h"
 
 
-/* One check of one server, in its own pool. */
+/* One check of one server. */
 
 typedef struct {
-    ngx_queue_t                     queue;       /* in a round, waiting */
+    ngx_rbtree_node_t               node;        /* key: the peer */
+    ngx_queue_t                     queue;       /* while waiting */
     ngx_http_hc_t                  *check;
     ngx_http_upstream_rr_peers_t   *peers;
     ngx_http_upstream_rr_peer_t    *peer;
     ngx_pool_t                     *pool;
     ngx_peer_connection_t           pc;
-    u_char                         *sent;
+    size_t                          sent;
     ngx_http_hc_response_t          resp;
     unsigned                        started:1;
 } ngx_http_hc_probe_t;
 
 
-/*
- * Probes wait in a queue and at most max_active of them have a connection
- * at a time, so that a round doesn't take every connection of worker 0.
- */
-static ngx_queue_t  ngx_http_hc_waiting;
-static ngx_uint_t   ngx_http_hc_active;
-static ngx_uint_t   ngx_http_hc_max_active;
-static ngx_uint_t   ngx_http_hc_starting;
-
-
-static void ngx_http_hc_run(ngx_event_t *ev);
+static void ngx_http_hc_tick(ngx_event_t *ev);
+static ngx_uint_t ngx_http_hc_probing(ngx_http_hc_t *hc,
+    ngx_http_upstream_rr_peer_t *peer);
 static void ngx_http_hc_start(void);
-static void ngx_http_hc_connect(ngx_http_hc_probe_t *probe);
+static void ngx_http_hc_connect(ngx_http_hc_probe_t *p);
 static void ngx_http_hc_connected(ngx_event_t *ev);
 #if (NGX_HTTP_SSL)
 static void ngx_http_hc_ssl_handshake(ngx_http_hc_probe_t *p,
@@ -51,10 +51,15 @@ static void ngx_http_hc_recv(ngx_event_t *rev);
 static void ngx_http_hc_dummy(ngx_event_t *ev);
 static void ngx_http_hc_finish(ngx_http_hc_probe_t *p, const char *reason);
 static void ngx_http_hc_abort(ngx_http_hc_probe_t *p, const char *reason);
-static void ngx_http_hc_close(ngx_http_hc_probe_t *probe);
+static void ngx_http_hc_close(ngx_http_hc_probe_t *p);
 
 
-/* Checks run in worker 0 only. */
+/* worker 0's probes waiting for a connection */
+static ngx_queue_t  ngx_http_hc_waiting;
+static ngx_uint_t   ngx_http_hc_active;
+static ngx_uint_t   ngx_http_hc_max_active;
+static ngx_uint_t   ngx_http_hc_starting;
+
 
 ngx_int_t
 ngx_http_hc_init_process(ngx_cycle_t *cycle)
@@ -83,7 +88,10 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
     hc = hmcf->checks.elts;
 
     for (i = 0; i < hmcf->checks.nelts; i++) {
-        hc[i].timer.handler = ngx_http_hc_run;
+        ngx_rbtree_init(&hc[i].probes, &hc[i].sentinel,
+                        ngx_rbtree_insert_value);
+
+        hc[i].timer.handler = ngx_http_hc_tick;
         hc[i].timer.data = &hc[i];
         hc[i].timer.log = cycle->log;
         hc[i].timer.cancelable = 1;
@@ -95,83 +103,93 @@ ngx_http_hc_init_process(ngx_cycle_t *cycle)
 }
 
 
-/* Timer: probe every server of the group, primary and backup. */
+/*
+ * Every interval: a probe for each server of the group, primary or backup,
+ * unless it is down by configuration or its last probe isn't over.
+ */
 
 static void
-ngx_http_hc_run(ngx_event_t *ev)
+ngx_http_hc_tick(ngx_event_t *ev)
 {
-    ngx_pool_t                    *pool;
-    ngx_queue_t                    list;
+    ngx_http_hc_t *hc = ev->data;
+
+    ngx_http_hc_probe_t           *p;
     ngx_http_upstream_rr_peer_t   *peer;
     ngx_http_upstream_rr_peers_t  *peers;
-    ngx_http_hc_t                 *check;
-    ngx_http_hc_probe_t           *probe;
-
-    check = ev->data;
 
     if (ngx_exiting || ngx_quit || ngx_terminate) {
         return;
     }
 
-    ngx_queue_init(&list);
-
-    for (peers = check->uscf->peer.data; peers; peers = peers->next) {
+    for (peers = hc->uscf->peer.data; peers; peers = peers->next) {
 
         ngx_http_upstream_rr_peers_rlock(peers);
 
         for (peer = peers->peer; peer; peer = peer->next) {
 
-            if (peer->down & NGX_HTTP_HC_CONF_DOWN) {
+            if ((peer->down & NGX_HTTP_HC_CONF_DOWN)
+                || ngx_http_hc_probing(hc, peer))
+            {
                 continue;
             }
 
-            pool = ngx_create_pool(1024, ev->log);
-            if (pool == NULL) {
+            p = ngx_calloc(sizeof(ngx_http_hc_probe_t), ev->log);
+            if (p == NULL) {
                 continue;
             }
 
-            probe = ngx_pcalloc(pool, sizeof(ngx_http_hc_probe_t));
-            if (probe == NULL) {
-                ngx_destroy_pool(pool);
-                continue;
-            }
-
-            probe->pool = pool;
-            probe->check = check;
-            probe->peers = peers;
-            probe->peer = peer;
+            p->check = hc;
+            p->peers = peers;
+            p->peer = peer;
+            p->node.key = (ngx_rbtree_key_t) peer;
 
             ngx_http_upstream_rr_peer_lock(peers, peer);
             ngx_http_upstream_rr_peer_ref(peers, peer);
             ngx_http_upstream_rr_peer_unlock(peers, peer);
 
-            ngx_queue_insert_tail(&list, &probe->queue);
-            check->pending++;
+            ngx_rbtree_insert(&hc->probes, &p->node);
+            ngx_queue_insert_tail(&ngx_http_hc_waiting, &p->queue);
         }
 
         ngx_http_upstream_rr_peers_unlock(peers);
     }
 
-    if (ngx_queue_empty(&list)) {
-        ngx_add_timer(ev, check->interval);
-        return;
-    }
-
-    /* the next round is scheduled when the last probe finishes */
-
-    ngx_queue_add(&ngx_http_hc_waiting, &list);
+    ngx_add_timer(ev, hc->interval);
 
     ngx_http_hc_start();
 }
 
 
-/* Starts waiting probes while fewer than max_active are running. */
+/* Whether the check has a probe of the server waiting or in progress. */
+
+static ngx_uint_t
+ngx_http_hc_probing(ngx_http_hc_t *hc, ngx_http_upstream_rr_peer_t *peer)
+{
+    ngx_rbtree_key_t    key;
+    ngx_rbtree_node_t  *node;
+
+    key = (ngx_rbtree_key_t) peer;
+    node = hc->probes.root;
+
+    while (node != hc->probes.sentinel) {
+        if (key == node->key) {
+            return 1;
+        }
+
+        node = (key < node->key) ? node->left : node->right;
+    }
+
+    return 0;
+}
+
+
+/* Starts waiting probes while fewer than max_active have a connection. */
 
 static void
 ngx_http_hc_start(void)
 {
     ngx_queue_t          *q;
-    ngx_http_hc_probe_t  *probe;
+    ngx_http_hc_probe_t  *p;
 
     /* a probe that ends at once calls this again: the loop goes on */
 
@@ -183,17 +201,16 @@ ngx_http_hc_start(void)
 
     while (ngx_http_hc_active < ngx_http_hc_max_active
            && !ngx_queue_empty(&ngx_http_hc_waiting)
-           && !ngx_exiting && !ngx_quit && !ngx_terminate)
+           && !ngx_exiting)
     {
         q = ngx_queue_head(&ngx_http_hc_waiting);
         ngx_queue_remove(q);
 
-        probe = ngx_queue_data(q, ngx_http_hc_probe_t, queue);
-
-        probe->started = 1;
+        p = ngx_queue_data(q, ngx_http_hc_probe_t, queue);
+        p->started = 1;
         ngx_http_hc_active++;
 
-        ngx_http_hc_connect(probe);
+        ngx_http_hc_connect(p);
     }
 
     ngx_http_hc_starting = 0;
@@ -201,59 +218,59 @@ ngx_http_hc_start(void)
 
 
 static void
-ngx_http_hc_connect(ngx_http_hc_probe_t *probe)
+ngx_http_hc_connect(ngx_http_hc_probe_t *p)
 {
-    ngx_int_t               rc;
-    ngx_connection_t       *c;
-    ngx_peer_connection_t  *pc;
-    ngx_http_hc_t          *check;
+    ngx_int_t                  rc;
+    ngx_connection_t          *c;
+    ngx_http_upstream_conf_t  *conf;
 
-    check = probe->check;
-    pc = &probe->pc;
+    conf = p->check->conf;
 
-    pc->sockaddr = probe->peer->sockaddr;
-    pc->socklen = probe->peer->socklen;
-    pc->name = &probe->peer->name;
-    pc->get = ngx_event_get_peer;
-    pc->log = check->timer.log;
-    pc->log_error = NGX_ERROR_INFO;
+    p->pool = ngx_create_pool(1024, ngx_cycle->log);
+    if (p->pool == NULL) {
+        ngx_http_hc_abort(p, "out of memory");
+        return;
+    }
 
-    rc = ngx_event_connect_peer(pc);
+    p->pc.sockaddr = p->peer->sockaddr;
+    p->pc.socklen = p->peer->socklen;
+    p->pc.name = &p->peer->name;
+    p->pc.get = ngx_event_get_peer;
+    p->pc.log = ngx_cycle->log;
+    p->pc.log_error = NGX_ERROR_INFO;
 
-    /* NGX_DECLINED: connect() failed; NGX_ERROR: no socket or connection */
+    rc = ngx_event_connect_peer(&p->pc);
 
     if (rc == NGX_DECLINED) {
-        ngx_http_hc_finish(probe, "connect() failed");
+        ngx_http_hc_finish(p, "connect() failed");
         return;
     }
 
     if (rc != NGX_OK && rc != NGX_AGAIN) {
-        ngx_http_hc_abort(probe, "cannot open a connection");
+        ngx_http_hc_abort(p, "cannot open a connection");
         return;
     }
 
-    c = pc->connection;
-    c->data = probe;
-    c->pool = probe->pool;
+    c = p->pc.connection;
+    c->data = p;
+    c->pool = p->pool;
     c->read->handler = ngx_http_hc_connected;
     c->write->handler = ngx_http_hc_connected;
 
-    /* don't hold up a worker that is shutting down */
+    /* don't hold up a worker that shuts down */
     c->read->cancelable = 1;
     c->write->cancelable = 1;
 
-    probe->sent = check->request.data;
-
-    if (ngx_http_hc_response_init(&probe->resp, c, check->conf->buffer_size,
-                                  check->match && check->match->body)
+    if (ngx_http_hc_response_init(&p->resp, c, conf->buffer_size,
+                                  p->check->match && p->check->match->body)
         != NGX_OK)
     {
-        ngx_http_hc_abort(probe, "out of memory");
+        ngx_http_hc_abort(p, "out of memory");
         return;
     }
 
-    /* for https, the SSL handshake must be done within it too */
-    ngx_add_timer(c->write, check->conf->connect_timeout);
+    /* for https, the handshake must be done within it too */
+    ngx_add_timer(c->write, conf->connect_timeout);
 
     if (rc == NGX_OK) {
         ngx_http_hc_connected(c->write);
@@ -418,41 +435,38 @@ static void
 ngx_http_hc_send(ngx_event_t *wev)
 {
     ssize_t               n;
-    u_char               *last;
+    ngx_str_t            *req;
     ngx_connection_t     *c;
-    ngx_http_hc_t        *check;
-    ngx_http_hc_probe_t  *probe;
+    ngx_http_hc_probe_t  *p;
 
     c = wev->data;
-    probe = c->data;
-    check = probe->check;
+    p = c->data;
+    req = &p->check->request;
 
     if (wev->timedout) {
-        ngx_http_hc_finish(probe, "timed out sending the request");
+        ngx_http_hc_finish(p, "timed out sending the request");
         return;
     }
 
-    last = check->request.data + check->request.len;
-
-    while (probe->sent < last) {
-        n = c->send(c, probe->sent, last - probe->sent);
+    while (p->sent < req->len) {
+        n = c->send(c, req->data + p->sent, req->len - p->sent);
 
         if (n == NGX_ERROR) {
-            ngx_http_hc_finish(probe, "send() failed");
+            ngx_http_hc_finish(p, "send() failed");
             return;
         }
 
         if (n == NGX_AGAIN) {
-            ngx_add_timer(wev, check->conf->send_timeout);
+            ngx_add_timer(wev, p->check->conf->send_timeout);
 
             if (ngx_handle_write_event(wev, 0) != NGX_OK) {
-                ngx_http_hc_abort(probe, "cannot handle events");
+                ngx_http_hc_abort(p, "cannot handle events");
             }
 
             return;
         }
 
-        probe->sent += n;
+        p->sent += n;
     }
 
     if (wev->timer_set) {
@@ -464,7 +478,7 @@ ngx_http_hc_send(ngx_event_t *wev)
     wev->handler = ngx_http_hc_dummy;
 
     if (ngx_handle_write_event(wev, 0) != NGX_OK) {
-        ngx_http_hc_abort(probe, "cannot handle events");
+        ngx_http_hc_abort(p, "cannot handle events");
         return;
     }
 
@@ -587,6 +601,7 @@ ngx_http_hc_finish(ngx_http_hc_probe_t *p, const char *reason)
     }
 
     ngx_http_hc_close(p);
+    ngx_http_hc_start();
 }
 
 
@@ -606,55 +621,52 @@ ngx_http_hc_abort(ngx_http_hc_probe_t *p, const char *reason)
                   &p->check->file, p->check->line);
 
     ngx_http_hc_close(p);
+    ngx_http_hc_start();
 }
 
 
-/* Frees the probe, starts waiting ones, and schedules the next round. */
-
 static void
-ngx_http_hc_close(ngx_http_hc_probe_t *probe)
+ngx_http_hc_close(ngx_http_hc_probe_t *p)
 {
-    ngx_http_hc_t  *check;
+    ngx_connection_t  *c;
 
-    check = probe->check;
+    c = p->pc.connection;
 
-    if (probe->pc.connection) {
-
+    if (c) {
 #if (NGX_HTTP_SSL)
-        if (probe->pc.connection->ssl) {
-            /* nothing more to say to the server, or to hear from it */
-            probe->pc.connection->ssl->no_wait_shutdown = 1;
-            probe->pc.connection->ssl->no_send_shutdown = 1;
-
-            (void) ngx_ssl_shutdown(probe->pc.connection);
+        if (c->ssl) {
+            c->ssl->no_wait_shutdown = 1;
+            c->ssl->no_send_shutdown = 1;
+            (void) ngx_ssl_shutdown(c);
         }
 #endif
 
-        ngx_close_connection(probe->pc.connection);
-        probe->pc.connection = NULL;
+        ngx_close_connection(c);
     }
 
-    if (probe->started) {
-        ngx_http_hc_active--;
+    if (p->pool) {
+        ngx_destroy_pool(p->pool);
     }
+
+    if (p->started) {
+        ngx_http_hc_active--;
+
+    } else {
+        ngx_queue_remove(&p->queue);
+    }
+
+    ngx_rbtree_delete(&p->check->probes, &p->node);
 
     /* as ngx_http_upstream_free_round_robin_peer() */
 
-    ngx_http_upstream_rr_peers_rlock(probe->peers);
-    ngx_http_upstream_rr_peer_lock(probe->peers, probe->peer);
+    ngx_http_upstream_rr_peers_rlock(p->peers);
+    ngx_http_upstream_rr_peer_lock(p->peers, p->peer);
 
-    if (ngx_http_upstream_rr_peer_unref(probe->peers, probe->peer) == NGX_OK) {
-        ngx_http_upstream_rr_peer_unlock(probe->peers, probe->peer);
+    if (ngx_http_upstream_rr_peer_unref(p->peers, p->peer) == NGX_OK) {
+        ngx_http_upstream_rr_peer_unlock(p->peers, p->peer);
     }
 
-    ngx_http_upstream_rr_peers_unlock(probe->peers);
+    ngx_http_upstream_rr_peers_unlock(p->peers);
 
-    ngx_destroy_pool(probe->pool);
-
-    if (--check->pending == 0 && !ngx_exiting && !ngx_quit && !ngx_terminate)
-    {
-        ngx_add_timer(&check->timer, check->interval);
-    }
-
-    ngx_http_hc_start();
+    ngx_free(p);
 }

@@ -257,7 +257,7 @@ expect "dns: all three addresses"              /dns/ 127.0.0.1,127.0.0.2,127.0.0
 attempts "dns flaky: three attempts"           /flaky/dns/ "503 503, 503, 503"
 
 dns 127.0.0.1 127.0.0.2
-cx "rm -rf /tmp/hc"
+set_state
 
 # --- DNS SRV server down by configuration ---------------------------------------
 # srv.test service=http -> a.srv.test:9201 = 127.0.0.4. nginx names such a
@@ -357,13 +357,18 @@ logged "1.0 probe gets 426 where 1.1 is needed" \
        'peer 127.0.0.1:9101 in upstream "hc_h10" is unhealthy: status 426 is not 2xx or 3xx'
 
 # --- a server that never answers -------------------------------------------------
-# hc_slow has 9302, which never answers: its probe waits for
+# hc_slow has 9302, which never answers, and 9101. Each server is probed on
+# its own schedule: 9101's state changes while 9302's probe waits for
 # proxy_read_timeout (4s).
 
 echo "a server that never answers"
+since=$(date +%s); set_state "touch /tmp/hc/9101.fail"
+logged "slow: 9101 taken out without waiting for 9302" \
+       'peer 127.0.0.1:9101 in upstream "hc_slow" is unhealthy'
 since=0
 logged "slow: 9302 fails on proxy_read_timeout" \
        'peer 127.0.0.1:9302 in upstream "hc_slow" is unhealthy: timed out reading the response'
+set_state
 
 # --- https --------------------------------------------------------------------
 # tls.test: 9401 (needs SNI) with backup 9402, verified against test-ca,
@@ -371,7 +376,6 @@ logged "slow: 9302 fails on proxy_read_timeout" \
 # wrong.test and hc_tls_ca fail verification: their probes say why.
 
 echo "https"
-set_state
 expect "tls: SNI and verification pass, 9401"  /tls/ 9401
 since=$(date +%s); set_state "touch /tmp/hc/9401.fail"
 expect "tls: 9401 taken out, backup 9402"      /tls/ 9402

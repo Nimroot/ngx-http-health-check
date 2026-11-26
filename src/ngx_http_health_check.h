@@ -78,7 +78,8 @@ typedef struct {
     ngx_uint_t                      line;
 
     ngx_event_t                     timer;
-    ngx_uint_t                      pending;
+    ngx_rbtree_t                    probes;      /* in progress, by peer */
+    ngx_rbtree_node_t               sentinel;
 } ngx_http_hc_t;
 
 

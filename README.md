@@ -75,7 +75,7 @@ The group must have a `zone`.
 
 | Parameter | Default | |
 |---|---|---|
-| `interval=time` | `5s` | time between two checks of a server |
+| `interval=time` | `5s` | time between the starts of two checks of a server |
 | `uri=uri` | `/` | URI of the check request, starting with `/` |
 | `match=name` | status 2xx or 3xx | `match` block the response must pass |
 
@@ -125,15 +125,17 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
 - Since the state is in shared memory, a new worker 0 (after a crash, for
   instance) carries on from it. A reload starts a new zone: all servers
   start healthy then, as do servers added by `resolve`.
-- A check holds a reference to its server, as a request does, and records
-  its result in that server only; if `resolve` removes the server
-  meanwhile, the result is dropped.
+- Each server is checked every `interval`, on its own: a server whose check
+  takes long (up to the timeouts below) is checked again once it is over,
+  without holding up the others. A check holds a reference to its server,
+  as a request does; if `resolve` removes the server meanwhile, the result
+  is dropped.
 - Servers marked `down` in the configuration are never checked or brought
   up. That includes servers added by `resolve`, also from SRV records
   (`service=`). A server marked `drain` is checked like any other: while it
   is unhealthy, it gets no requests at all, not even from clients bound to
   it by `sticky`.
-- A check opens a new connection to each server and sends `GET <uri>` with
+- A check opens a new connection to the server and sends `GET <uri>` with
   the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
   `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is
   `$proxy_host` (the group's name), plus `Connection: close`.
@@ -157,10 +159,10 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   - a connection closed early, a second `Content-Length` or
     `Transfer-Encoding`, both together, a transfer coding other than
     `chunked`, an invalid chunk or an invalid header line fail the check.
-- At most a quarter of `worker_connections` probes run at once; the others
-  wait for their turn. A probe that worker 0 cannot carry out for a reason
-  of its own (no free connection, out of memory) leaves the server's state
-  as it was and logs an `error`.
+- At most a quarter of `worker_connections` checks have a connection at a
+  time; the others wait for their turn. A check that worker 0 cannot carry
+  out for a reason of its own (no free connection, out of memory) leaves the
+  server's state as it was and logs an `error`.
 - A change of state is logged: `warn` with the reason when a check fails,
   `notice` when it passes again:
 
@@ -239,7 +241,8 @@ where requests go:
 - chunked bodies decoded for `match`, incomplete or invalid ones failing; an
   HTTP/1.0 check failing on a server that answers HTTP/1.0 with 426, as Envoy
   does by default;
-- a server that never answers fails on `proxy_read_timeout`;
+- a server that never answers fails on `proxy_read_timeout`, without delaying
+  the checks of the other servers of its group;
 - `https://` checks: SNI, verification against a private CA, and failures
   for a certificate for another name or from another CA;
 - more servers than free connections in worker 0 don't make any check fail;
