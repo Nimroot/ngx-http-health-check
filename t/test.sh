@@ -14,7 +14,9 @@ pass=0 fail=0
 ok()  { printf '  \e[32mPASS\e[0m %-56s %s\n' "$1" "$2"; ((pass++)); }
 bad() { printf '  \e[31mFAIL\e[0m %-56s %s\n' "$1" "$2"; ((fail++)); }
 
-"$ENGINE" run -d --name "$C" -p 127.0.0.1::8082 "$IMAGE" >/dev/null || exit 1
+# --init: nginx isn't process 1, which would reap (and log) the helpers'
+# orphans
+"$ENGINE" run -d --init --name "$C" -p 127.0.0.1::8082 "$IMAGE" >/dev/null || exit 1
 cleanup() {
     ((fail)) && "$ENGINE" logs "$C" 2>&1 | tail -n 40
     "$ENGINE" rm -f "$C" >/dev/null
