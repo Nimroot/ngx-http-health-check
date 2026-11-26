@@ -187,7 +187,7 @@ ngx_http_hc_health_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
             /* it goes into the request line as it is */
 
-            if (s.len == 0) {
+            if (s.len == 0 || s.data[0] != '/') {
                 goto invalid;
             }
 

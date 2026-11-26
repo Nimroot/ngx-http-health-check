@@ -416,6 +416,8 @@ conf_test "invalid interval"                        'invalid parameter "interval
     "$(srv 'location / { proxy_pass http://z; health_check interval=soon; }')"
 conf_test "uri with a space"                        'invalid parameter "uri=/a b"' \
     "$(srv 'location / { proxy_pass http://z; health_check "uri=/a b"; }')"
+conf_test "uri without a slash"                     'invalid parameter "uri=hc"' \
+    "$(srv 'location / { proxy_pass http://z; health_check uri=hc; }')"
 conf_test "health_check outside location"           '"health_check" directive is not allowed here' \
     "$(srv 'health_check;')"
 conf_test "match: require not supported"            '"require" in "match" is not supported' \

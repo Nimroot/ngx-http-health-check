@@ -76,7 +76,7 @@ The group must have a `zone`.
 | Parameter | Default | |
 |---|---|---|
 | `interval=time` | `5s` | time between two checks of a server |
-| `uri=uri` | `/` | URI of the check request |
+| `uri=uri` | `/` | URI of the check request, starting with `/` |
 | `match=name` | status 2xx or 3xx | `match` block the response must pass |
 
 Without `match`, a check passes if the server answers with a 2xx or 3xx
