@@ -37,10 +37,10 @@
  * A server's health is kept where every load-balancing method looks: its
  * "down" field, in the group's zone. Each health_check of the group owns
  * one bit there, above the values nginx uses itself ("down" on the server
- * line is 1, "drain" is 8). A server is used while "down" is 0.
+ * line is NGX_HTTP_UPSTREAM_FAILED, "drain" NGX_HTTP_UPSTREAM_DRAINING).
+ * A server is used while "down" is 0.
  */
 
-#define NGX_HTTP_HC_CONF_DOWN   1
 #define NGX_HTTP_HC_SHIFT       16
 #define NGX_HTTP_HC_MASK        ((ngx_uint_t) -1 << NGX_HTTP_HC_SHIFT)
 #define NGX_HTTP_HC_MAX         (sizeof(ngx_uint_t) * 8 - NGX_HTTP_HC_SHIFT)

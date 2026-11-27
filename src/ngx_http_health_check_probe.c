@@ -157,7 +157,7 @@ ngx_http_hc_tick(ngx_event_t *ev)
 
         for (peer = peers->peer; peer; peer = peer->next) {
 
-            if ((peer->down & NGX_HTTP_HC_CONF_DOWN)
+            if ((peer->down & NGX_HTTP_UPSTREAM_FAILED)
                 || ngx_http_hc_probing(hc, peer))
             {
                 continue;
