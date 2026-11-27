@@ -270,6 +270,11 @@ make test ENGINE=docker NGINX_VERSION=1.29.8
 Each run uses a container of its own and a free port, so runs can go side
 by side. Requirements: podman or docker, curl, bash.
 
+The tests in `t/*.t`, written for nginx's own test suite,
+[nginx-tests](https://github.com/nginx/nginx-tests), run after `t/test.sh`,
+whose parts they take over one by one; `make check PROVE='-v t/<test>.t'`
+runs one of them.
+
 ## License
 
 BSD 2-Clause, see [LICENSE](LICENSE). nginx itself is under the same license.
