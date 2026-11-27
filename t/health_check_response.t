@@ -172,8 +172,13 @@ expect('/raw/', $backup, '17 interim responses fail');
 logged($t, $mark, 'upstream "hc_raw" is unhealthy: too many interim responses',
 	'reason: too many interim responses');
 
+# before nginx 1.29.8, the proxy takes a second 103 in a row for the final
+# response and returns it to the client: the log tells the check's result
+
+$mark = log_mark($t);
 raw($t, early(16) . $ok);
-expect('/raw/', 'ok', '16 interim responses pass');
+logged($t, $mark, 'peer 127.0.0.1:' . port(8090) . ' in upstream "hc_raw" '
+	. 'is healthy', '16 interim responses pass');
 
 $mark = log_mark($t);
 raw($t, early(1));
