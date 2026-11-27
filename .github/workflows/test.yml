@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        nginx: ["1.29.8", "1.30.6"]
+        nginx: ["1.29.6", "1.29.8", "1.30.6"]
     steps:
       - uses: actions/checkout@v4
       - run: make test ENGINE=docker NGINX_VERSION=${{ matrix.nginx }}

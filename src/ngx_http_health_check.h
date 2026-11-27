@@ -20,8 +20,8 @@
 #include <ngx_http.h>
 
 
-#if (nginx_version < 1029004)
-#error ngx_http_health_check_module needs nginx 1.29.4 or later
+#if (nginx_version < 1029006)
+#error ngx_http_health_check_module needs nginx 1.29.6 or later
 #endif
 
 #if !(NGX_HTTP_UPSTREAM_ZONE)

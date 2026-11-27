@@ -6,9 +6,9 @@ and `match` directives of the NGINX Plus
 which this module reimplements in part. A configuration that uses the
 supported subset works unchanged on both.
 
-> **Status: experimental.** Tested with nginx 1.29.8 and 1.30.6 on Linux, in
-> the scenarios under [Testing](#testing). Review it before relying on it in
-> production.
+> **Status: experimental.** Tested with nginx 1.29.6, 1.29.8 and 1.30.6 on
+> Linux, in the scenarios under [Testing](#testing). Review it before relying
+> on it in production.
 
 ```nginx
 load_module modules/ngx_http_health_check_module.so;
@@ -41,8 +41,8 @@ check passes again. If every server in the group is unhealthy, requests get 502.
 
 ## Requirements
 
-- nginx **1.29.4 or later** (it uses `ngx_http_proxy_module.h`, added in 1.29.4).
-  Older versions stop the build with an explicit error.
+- nginx **1.29.6 or later**, the oldest version it is tested with. Older
+  versions stop the build with an explicit error.
 - PCRE (for `~` tests) and the upstream zone module, both part of a default
   build.
 - An upstream group with a `zone`, used with `proxy_pass` (`http://` or
@@ -240,8 +240,7 @@ the module in a container (Alpine, from source) and runs them there with
 - `proxy_next_upstream` counts only healthy servers;
 - with two checks of one group, a server is used only while it passes both;
   restarting the workers keeps the state, with no new warning;
-- a `drain` server is checked, and when unhealthy loses its `sticky` clients
-  (skipped before nginx 1.29.6);
+- a `drain` server is checked, and when unhealthy loses its `sticky` clients;
 - with `resolve`, servers added by DNS are checked, and removing an unhealthy
   server leaves the count of usable servers correct (a DNS server in the test
   serves the changing answers); an SRV server marked `down` gets neither

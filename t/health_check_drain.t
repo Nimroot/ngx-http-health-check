@@ -25,12 +25,8 @@ use Test::Nginx::HealthCheck;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http proxy upstream_zone upstream_sticky/);
-
-plan(skip_all => 'no drain before nginx 1.29.6')
-	unless $t->has_version('1.29.6');
-
-$t->plan(6);
+my $t = Test::Nginx->new()->has(qw/http proxy upstream_zone upstream_sticky/)
+	->plan(6);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
