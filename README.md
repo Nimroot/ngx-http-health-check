@@ -137,9 +137,10 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   it by `sticky`.
 - A check opens a new connection to the server, from the location's
   `proxy_bind` address if it is set without variables, and sends `GET <uri>`
-  with the location's `proxy_http_version`: `HTTP/1.1` (nginx's default) or
-  `HTTP/1.0`; with `proxy_http_version 2`, `HTTP/1.1`. `Host:` is
-  `$proxy_host` (the group's name), plus `Connection: close`.
+  with the location's `proxy_http_version`, `HTTP/1.1` or `HTTP/1.0`, or
+  without it nginx's default: `HTTP/1.1` from nginx 1.29.7, `HTTP/1.0`
+  before. With `proxy_http_version 2`, `HTTP/1.1`. `Host:` is `$proxy_host`
+  (the group's name), plus `Connection: close`.
 - Timeouts are the location's, as for requests: `proxy_connect_timeout` to
   connect (and for the TLS handshake), `proxy_send_timeout` while the request
   can't be sent, `proxy_read_timeout` between two reads of the response.
