@@ -221,13 +221,16 @@ not from testing against NGINX Plus.
 | `src/ngx_http_health_check_probe.c` | scheduling checks in worker 0, connecting, TLS, sending, recording the result |
 | `src/ngx_http_health_check_response.c` | reading and parsing a response with nginx's parsers |
 | `src/ngx_http_health_check.h` | types shared by the source files |
-| `t/` | test container and black-box tests (see below) |
+| `t/` | tests for nginx-tests, and the container they run in (see below) |
 
 ## Testing
 
-`make test` builds nginx with the module in a container (Alpine, from source),
-starts it, and runs `t/test.sh`, which takes backends down and up and checks
-where requests go:
+The tests in `t/*.t` are written for nginx's own test suite,
+[nginx-tests](https://github.com/nginx/nginx-tests): each starts nginx with a
+configuration of its own, backends included, takes backends down and up, and
+checks where requests go and what is logged. `make test` builds nginx with
+the module in a container (Alpine, from source) and runs them there with
+`prove`:
 
 - unhealthy servers are taken out and come back; `uri=` and `match=` (status,
   header and body tests, negated or not) decide health; the default URI is
@@ -237,15 +240,16 @@ where requests go:
 - `proxy_next_upstream` counts only healthy servers;
 - with two checks of one group, a server is used only while it passes both;
   restarting the workers keeps the state, with no new warning;
-- a `drain` server is checked, and when unhealthy loses its `sticky` clients;
+- a `drain` server is checked, and when unhealthy loses its `sticky` clients
+  (skipped before nginx 1.29.6);
 - with `resolve`, servers added by DNS are checked, and removing an unhealthy
-  server leaves the count of usable servers correct (dnsmasq in the container
+  server leaves the count of usable servers correct (a DNS server in the test
   serves the changing answers); an SRV server marked `down` gets neither
   probes nor requests;
-- incomplete or ambiguously delimited responses fail, served byte for byte by
-  socat; responses without a body or delimited by closing pass, as do
-  responses after `103 Early Hints`, even when the two headers together are
-  over `proxy_buffer_size`; a header over `proxy_buffer_size`, more than 16
+- incomplete or ambiguously delimited responses fail, served byte for byte;
+  responses without a body or delimited by closing pass, as do responses
+  after `103 Early Hints`, even when the two headers together are over
+  `proxy_buffer_size`; a header over `proxy_buffer_size`, more than 16
   interim responses, a connection closed without a response or after an
   interim one, or TLS data in answer to `http://` fail with a reason saying
   so;
@@ -255,25 +259,37 @@ where requests go:
 - checks come from the `proxy_bind` address;
 - a server that never answers fails on `proxy_read_timeout`, without delaying
   the checks of the other servers of its group;
-- `https://` checks: SNI, verification against a private CA, and failures
-  for a certificate for another name or from another CA;
+- `https://` checks: SNI, verification against a trusted certificate, and
+  failures for a certificate for another name or from an untrusted issuer;
 - more servers than free connections in worker 0 don't make any check fail;
   a worker that shuts down with a check in progress leaves no socket open;
-- log messages; and `nginx -t` accepts valid configurations and rejects each
-  unsupported or invalid one with a clear message.
+- log messages, with no `alert` in any test; and `nginx -t` accepts valid
+  configurations and rejects each unsupported or invalid one with a clear
+  message.
 
 ```sh
 make test                                   # podman, nginx 1.30.6
 make test ENGINE=docker NGINX_VERSION=1.29.8
+make check PROVE='-v t/health_check_ssl.t'  # one test, verbose
 ```
 
-Each run uses a container of its own and a free port, so runs can go side
-by side. Requirements: podman or docker, curl, bash.
+Each run uses a container of its own, so runs can go side by side.
+Requirements: podman or docker.
 
-The tests in `t/*.t`, written for nginx's own test suite,
-[nginx-tests](https://github.com/nginx/nginx-tests), run after `t/test.sh`,
-whose parts they take over one by one; `make check PROVE='-v t/<test>.t'`
-runs one of them.
+The tests also run without a container, on Linux (they listen on 127.0.0.2
+to 127.0.0.4, and find nginx's workers in `/proc`), as a user other than
+root, with nginx built with the module and a checkout of nginx-tests:
+
+```sh
+TEST_NGINX_BINARY=/path/to/objs/nginx \
+TEST_NGINX_GLOBALS='load_module /path/to/objs/ngx_http_health_check_module.so;' \
+prove -I /path/to/nginx-tests/lib t/
+```
+
+`TEST_NGINX_GLOBALS` is for a dynamic module only. nginx-tests'
+other variables apply, such as `TEST_NGINX_VERBOSE`, `TEST_NGINX_LEAVE` or
+`TEST_NGINX_CATLOG`; `TEST_NGINX_HC_WAIT` sets how many seconds a test waits
+for a server's state to change (8).
 
 ## License
 

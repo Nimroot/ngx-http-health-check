@@ -1,9 +1,9 @@
-# Builds nginx with this module in a container and runs t/test.sh against it,
-# then the tests in t/*.t, with nginx-tests' Test::Nginx.
+# Builds nginx with this module in a container and runs the tests in t/*.t
+# against it, with nginx-tests' Test::Nginx.
 #   make test                          podman, nginx 1.30.6
 #   make test ENGINE=docker NGINX_VERSION=1.29.8
 #   make check IMAGE=...               test an existing image, no build
-#   make check PROVE='-v t/health_check_config.t'   prove's arguments
+#   make check PROVE='-v t/health_check_ssl.t'   prove's arguments
 # Each run has a container of its own, so runs may go side by side.
 
 ENGINE         ?= podman
@@ -19,9 +19,7 @@ test: image
 	@$(MAKE) --no-print-directory check
 
 check:
-	ENGINE=$(ENGINE) IMAGE=$(IMAGE) ./t/test.sh
-	$(ENGINE) run --rm --init --user nginx -w /tests --entrypoint prove \
-	  $(IMAGE) -I /nginx-tests/lib $(PROVE)
+	$(ENGINE) run --rm --init $(IMAGE) $(PROVE)
 
 image:
 	$(ENGINE) build -t $(IMAGE) -f t/Containerfile \

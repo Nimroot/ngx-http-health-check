@@ -1,8 +1,6 @@
-# Test image: nginx built from source with this module, plus dnsmasq for the
-# "resolve" tests, socat for raw responses and a server that never answers,
-# and certificates for the https tests; and the tests in t/*.t, with
-# nginx-tests' Test::Nginx and perl to run them. Build context: the
-# repository root (see the Makefile).
+# Test image: nginx built from source with this module, and the tests in
+# t/*.t, with nginx-tests' Test::Nginx and perl to run them (prove). Build
+# context: the repository root (see the Makefile).
 
 ARG ALPINE_VERSION=3.24.4
 ARG NGINX_VERSION=1.30.6
@@ -13,19 +11,7 @@ ARG NGINX_VERSION
 ARG NGINX_TESTS_COMMIT
 
 RUN apk add --no-cache \
-      gcc git linux-headers make musl-dev openssl openssl-dev pcre2-dev zlib-dev
-
-# test-ca signs the certificate of tls.test; other-ca signs nothing
-WORKDIR /certs
-RUN for ca in test-ca other-ca; do \
-      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-        -days 3650 -subj "/CN=$ca" -keyout "$ca.key" -out "$ca.crt" || exit 1; \
-    done \
- && openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-      -subj /CN=tls.test -keyout tls.key -out tls.csr \
- && printf 'subjectAltName=DNS:tls.test\n' > tls.ext \
- && openssl x509 -req -in tls.csr -CA test-ca.crt -CAkey test-ca.key \
-      -CAcreateserial -days 3650 -extfile tls.ext -out tls.crt
+      gcc git linux-headers make musl-dev openssl-dev pcre2-dev zlib-dev
 
 WORKDIR /build
 RUN git clone --depth 1 --branch "release-${NGINX_VERSION}" \
@@ -40,41 +26,24 @@ COPY src/ /build/module/src/
 
 WORKDIR /build/nginx
 RUN ./auto/configure \
-      --prefix=/etc/nginx \
-      --sbin-path=/usr/sbin/nginx \
-      --modules-path=/usr/lib/nginx/modules \
-      --conf-path=/etc/nginx/nginx.conf \
-      --error-log-path=/dev/stderr \
-      --http-log-path=/dev/stdout \
-      --pid-path=/tmp/nginx.pid \
-      --lock-path=/tmp/nginx.lock \
-      --http-client-body-temp-path=/tmp/client_temp \
-      --http-proxy-temp-path=/tmp/proxy_temp \
-      --http-fastcgi-temp-path=/tmp/fastcgi_temp \
-      --http-uwsgi-temp-path=/tmp/uwsgi_temp \
-      --http-scgi-temp-path=/tmp/scgi_temp \
-      --user=nginx --group=nginx \
       --with-compat --with-http_ssl_module \
       --add-dynamic-module=../module \
- && make -j"$(nproc)" \
- && make install DESTDIR=/out \
- && ln -s /usr/lib/nginx/modules /out/etc/nginx/modules
+ && make -j"$(nproc)"
 
+# The tests run as a user of their own: nginx then runs its workers as
+# that user too, and they can read the tests' files.
 FROM docker.io/library/alpine:${ALPINE_VERSION}
-RUN apk add --no-cache dnsmasq libcrypto3 libssl3 openssl pcre2 perl perl-utils socat zlib \
- && addgroup -S nginx \
- && adduser -S -D -H -G nginx -h /nonexistent -s /sbin/nologin nginx
-COPY --from=builder /out/usr/sbin/nginx /usr/sbin/nginx
-COPY --from=builder /out/usr/lib/nginx/modules/ /usr/lib/nginx/modules/
-COPY --from=builder /out/etc/nginx/ /etc/nginx/
-COPY --from=builder /certs/test-ca.crt /certs/other-ca.crt /certs/tls.crt \
-     /certs/tls.key /etc/nginx/certs/
+RUN apk add --no-cache libcrypto3 libssl3 openssl pcre2 perl perl-utils zlib \
+ && adduser -S -D -H -h /nonexistent -s /sbin/nologin test
+COPY --from=builder /build/nginx/objs/nginx /usr/sbin/nginx
+COPY --from=builder /build/nginx/objs/ngx_http_health_check_module.so \
+     /usr/lib/nginx/modules/
 COPY --from=builder /build/nginx-tests/lib/ /nginx-tests/lib/
-COPY t/nginx.conf /etc/nginx/nginx.conf
-COPY t/entrypoint.sh t/raw.sh /
 COPY t/lib/ /tests/t/lib/
 COPY t/*.t /tests/t/
 ENV TEST_NGINX_BINARY=/usr/sbin/nginx \
     TEST_NGINX_GLOBALS="load_module /usr/lib/nginx/modules/ngx_http_health_check_module.so;"
-STOPSIGNAL SIGQUIT
-ENTRYPOINT ["/entrypoint.sh"]
+USER test
+WORKDIR /tests
+ENTRYPOINT ["prove", "-I", "/nginx-tests/lib"]
+CMD ["-j8", "t"]
