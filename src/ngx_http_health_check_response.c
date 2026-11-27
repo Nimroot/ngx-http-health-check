@@ -7,10 +7,11 @@
  * header lines, and the body as framed by Content-Length, by chunked
  * Transfer-Encoding, or by the end of the connection.
  *
- * The header must fit in the buffer (proxy_buffer_size, as for requests);
- * the buffer is then reused for the body, which only passes through: only
- * its first NGX_HTTP_HC_BODY_MAX bytes are read, and kept if a body test
- * needs them.
+ * Each header must fit in the buffer (proxy_buffer_size, as for requests):
+ * after an interim response, what follows it is moved to the start of the
+ * buffer, as the proxy does. The buffer is then reused for the body, which
+ * only passes through: only its first NGX_HTTP_HC_BODY_MAX bytes are read,
+ * and kept if a body test needs them.
  */
 
 
@@ -100,7 +101,7 @@ ngx_http_hc_response_recv(ngx_http_hc_response_t *resp, ngx_connection_t *c)
 
         if (n == 0) {
             if (resp->phase != NGX_HTTP_HC_BODY_BYTES) {
-                resp->error = (b->last == b->start)
+                resp->error = (b->last == b->start && resp->interim == 0)
                               ? "connection closed without a response"
                               : "connection closed before the response "
                                 "header was complete";
@@ -185,9 +186,22 @@ ngx_http_hc_response_parse(ngx_http_hc_response_t *resp)
 
             code = resp->status.code;
 
-            /* an interim response (RFC 9110, 15.2): the final one follows */
+            /*
+             * An interim response (RFC 9110, 15.2): the final one follows,
+             * with the whole buffer for its header. Their number is
+             * limited, as the read timeout starts again with each read.
+             */
 
             if (code < 200 && code != 101) {
+
+                if (++resp->interim > NGX_HTTP_HC_INTERIM_MAX) {
+                    resp->error = "too many interim responses";
+                    return NGX_DECLINED;
+                }
+
+                b->last = ngx_movemem(b->start, b->pos, b->last - b->pos);
+                b->pos = b->start;
+
                 ngx_http_hc_response_reset(resp);
                 break;
             }

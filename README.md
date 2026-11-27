@@ -152,8 +152,9 @@ Header names are case-insensitive. Only the first 256k of the body is examined.
   certificate check fails the check, with the reason in the log. Each check
   does a full handshake (no session reuse).
 - The response is read with nginx's own parsers, by the rules of its proxy:
-  - interim responses (1xx, such as `103 Early Hints`) are skipped;
-  - the header must fit in `proxy_buffer_size`;
+  - interim responses (1xx, such as `103 Early Hints`) are skipped, up to
+    16 of them;
+  - each header, interim ones too, must fit in `proxy_buffer_size`;
   - a response with status 204 or 304 ends with its header; any other body
     ends after `Content-Length` bytes (or the first 256k of them), with the
     last chunk of a `chunked` body (`match` sees the decoded data), or when
@@ -242,9 +243,11 @@ where requests go:
   probes nor requests;
 - incomplete or ambiguously delimited responses fail, served byte for byte by
   socat; responses without a body or delimited by closing pass, as do
-  responses after `103 Early Hints`; a header over `proxy_buffer_size`, a
-  connection closed without a response, or TLS data in answer to `http://`
-  fail with a reason saying so;
+  responses after `103 Early Hints`, even when the two headers together are
+  over `proxy_buffer_size`; a header over `proxy_buffer_size`, more than 16
+  interim responses, a connection closed without a response or after an
+  interim one, or TLS data in answer to `http://` fail with a reason saying
+  so;
 - chunked bodies decoded for `match`, incomplete or invalid ones failing; an
   HTTP/1.0 check failing on a server that answers HTTP/1.0 with 426, as Envoy
   does by default;

@@ -46,6 +46,7 @@
 #define NGX_HTTP_HC_MAX         (sizeof(ngx_uint_t) * 8 - NGX_HTTP_HC_SHIFT)
 
 #define NGX_HTTP_HC_BODY_MAX    (256 * 1024)     /* body bytes examined */
+#define NGX_HTTP_HC_INTERIM_MAX 16               /* 1xx responses skipped */
 
 
 typedef struct {
@@ -103,6 +104,7 @@ typedef struct {
     off_t                           length;      /* body bytes so far */
     ngx_str_t                       body;        /* kept for body tests */
     size_t                          body_size;
+    ngx_uint_t                      interim;     /* 1xx responses skipped */
     const char                     *error;       /* why it is rejected */
     unsigned                        chunked:1;
     unsigned                        keep_body:1;

@@ -43,6 +43,14 @@ raw() {
         sh "$1"
 }
 
+# early N: N 103 Early Hints responses, as a printf format for raw
+early() {
+    local i
+    for ((i = 0; i < $1; i++)); do
+        printf '%s' 'HTTP/1.1 103 Early Hints\r\n\r\n'
+    done
+}
+
 # served PATH [CURL_ARG...]: who answers 8 requests, e.g. "9101,9102", "502"
 served() {
     local path=$1 i out
@@ -306,6 +314,21 @@ raw "HTTP/1.1 200 OK\r\nX-Pad: $(printf '%01500d' 0)\r\nContent-Length: 3\r\n\r\
 expect "raw: header over proxy_buffer_size fails" /raw/ 9102
 logged "reason: header too large" 'upstream "hc_raw" is unhealthy: response header too large'
 expect "raw11: fits its proxy_buffer_size"     /raw11/ ok
+raw "HTTP/1.1 103 Early Hints\r\nLink: <$(printf '%0680d' 0)>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nX-Pad: $(printf '%0400d' 0)\r\nContent-Length: 3\r\n\r\nok\n"
+expect "raw: each header gets the whole proxy_buffer_size" /raw/ ok
+since=$(date +%s)
+raw "$(early 17)$ok_resp"
+expect "raw: 17 interim responses fail"        /raw/ 9102
+logged "reason: too many interim responses" 'upstream "hc_raw" is unhealthy: too many interim responses'
+raw "$(early 16)$ok_resp"
+expect "raw: 16 interim responses pass"        /raw/ ok
+since=$(date +%s)
+raw "$(early 1)"
+expect "raw: closed after an interim response fails" /raw/ 9102
+logged "reason: header incomplete" \
+       'upstream "hc_raw" is unhealthy: connection closed before the response header was complete'
+raw "$ok_resp"
+expect "raw: complete response passes once more" /raw/ ok
 since=$(date +%s)
 raw ''
 expect "raw: closed without a response fails"  /raw/ 9102
